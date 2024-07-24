@@ -212,25 +212,26 @@ if "__main__" == __name__:
         logging.info(f"Code snapshot saved to: {_code_snapshot_path}")
 
     # -------------------- Copy data to local scratch (Slurm) --------------------
-    if is_on_slurm() and (not args.do_not_copy_data):
-        # local scratch dir
-        original_data_dir = base_data_dir
-        base_data_dir = os.path.join(get_local_scratch_dir(), "Marigold_data")
-        # copy data
-        required_data_list = find_value_in_omegaconf("dir", cfg_data)
-        # if cfg_train.visualize.init_latent_path is not None:
-        #     required_data_list.append(cfg_train.visualize.init_latent_path)
-        required_data_list = list(set(required_data_list))
-        logging.info(f"Required_data_list: {required_data_list}")
-        for d in tqdm(required_data_list, desc="Copy data to local scratch"):
-            ori_dir = os.path.join(original_data_dir, d)
-            dst_dir = os.path.join(base_data_dir, d)
-            os.makedirs(os.path.dirname(dst_dir), exist_ok=True)
-            if os.path.isfile(ori_dir):
-                shutil.copyfile(ori_dir, dst_dir)
-            elif os.path.isdir(ori_dir):
-                shutil.copytree(ori_dir, dst_dir)
-        logging.info(f"Data copied to: {base_data_dir}")
+    # if is_on_slurm() and (not args.do_not_copy_data):
+    #     # local scratch dir
+    #     original_data_dir = base_data_dir
+    #     base_data_dir = os.path.join(get_local_scratch_dir(), "Marigold_data")
+    #     # copy data
+    #     required_data_list = find_value_in_omegaconf("dir", cfg_data)
+    #     # if cfg_train.visualize.init_latent_path is not None:
+    #     #     required_data_list.append(cfg_train.visualize.init_latent_path)
+    #     required_data_list = list(set(required_data_list))
+    #     logging.info(f"Required_data_list: {required_data_list}")
+    #     for d in tqdm(required_data_list, desc="Copy data to local scratch"):
+    #         ori_dir = os.path.join(original_data_dir, d)
+    #         dst_dir = os.path.join(base_data_dir, d)
+    #         print(dst_dir)
+    #         os.makedirs(os.path.dirname(dst_dir), exist_ok=True)
+    #         if os.path.isfile(ori_dir):
+    #             shutil.copyfile(ori_dir, dst_dir)
+    #         elif os.path.isdir(ori_dir):
+    #             shutil.copytree(ori_dir, dst_dir)
+    #     logging.info(f"Data copied to: {base_data_dir}")
 
     # -------------------- Gradient accumulation steps --------------------
     eff_bs = cfg.dataloader.effective_batch_size
@@ -253,6 +254,7 @@ if "__main__" == __name__:
     depth_transform: DepthNormalizerBase = get_depth_normalizer(
         cfg_normalizer=cfg.depth_normalization
     )
+    print(cfg_data.train)
     train_dataset: BaseDepthDataset = get_dataset(
         cfg_data.train,
         base_data_dir=base_data_dir,
@@ -288,37 +290,37 @@ if "__main__" == __name__:
             shuffle=True,
             generator=loader_generator,
         )
-    # Validation dataset
-    val_loaders: List[DataLoader] = []
-    for _val_dic in cfg_data.val:
-        _val_dataset = get_dataset(
-            _val_dic,
-            base_data_dir=base_data_dir,
-            mode=DatasetMode.EVAL,
-        )
-        _val_loader = DataLoader(
-            dataset=_val_dataset,
-            batch_size=1,
-            shuffle=False,
-            num_workers=cfg.dataloader.num_workers,
-        )
-        val_loaders.append(_val_loader)
+    # # Validation dataset
+    # val_loaders: List[DataLoader] = []
+    # for _val_dic in cfg_data.val:
+    #     _val_dataset = get_dataset(
+    #         _val_dic,
+    #         base_data_dir=base_data_dir,
+    #         mode=DatasetMode.EVAL,
+    #     )
+    #     _val_loader = DataLoader(
+    #         dataset=_val_dataset,
+    #         batch_size=1,
+    #         shuffle=False,
+    #         num_workers=cfg.dataloader.num_workers,
+    #     )
+    #     val_loaders.append(_val_loader)
 
-    # Visualization dataset
-    vis_loaders: List[DataLoader] = []
-    for _vis_dic in cfg_data.vis:
-        _vis_dataset = get_dataset(
-            _vis_dic,
-            base_data_dir=base_data_dir,
-            mode=DatasetMode.EVAL,
-        )
-        _vis_loader = DataLoader(
-            dataset=_vis_dataset,
-            batch_size=1,
-            shuffle=False,
-            num_workers=cfg.dataloader.num_workers,
-        )
-        vis_loaders.append(_vis_loader)
+    # # Visualization dataset
+    # vis_loaders: List[DataLoader] = []
+    # for _vis_dic in cfg_data.vis:
+    #     _vis_dataset = get_dataset(
+    #         _vis_dic,
+    #         base_data_dir=base_data_dir,
+    #         mode=DatasetMode.EVAL,
+    #     )
+    #     _vis_loader = DataLoader(
+    #         dataset=_vis_dataset,
+    #         batch_size=1,
+    #         shuffle=False,
+    #         num_workers=cfg.dataloader.num_workers,
+    #     )
+    #     vis_loaders.append(_vis_loader)
 
     # -------------------- Model --------------------
     _pipeline_kwargs = cfg.pipeline.kwargs if cfg.pipeline.kwargs is not None else {}
@@ -346,8 +348,8 @@ if "__main__" == __name__:
         out_dir_eval=out_dir_eval,
         out_dir_vis=out_dir_vis,
         accumulation_steps=accumulation_steps,
-        val_dataloaders=val_loaders,
-        vis_dataloaders=vis_loaders,
+        val_dataloaders=None, # val_loaders,
+        vis_dataloaders=None, # vis_loaders,
     )
 
     # -------------------- Checkpoint --------------------
