@@ -1,6 +1,6 @@
 dataset:
   train:
-    name: shadow
-    disp_name: shadow_train
-    dir: /scratch/zhiyanw/data/shadow.tar
-    filenames: data_split/shadow/shadow_train.txt
+    name: kandinsky_indoor_field
+    disp_name: field_train
+    dir: /scratch/yz5880/mini
+    filenames: /scratch/yz5880/mini_list.txt

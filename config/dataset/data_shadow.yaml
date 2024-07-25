@@ -1,4 +1,0 @@
-name: shadow
-disp_name: shadow_train
-dir: /scratch/zhiyanw/shadow.tar
-filenames: data_split/shadow/shadow_train.txt

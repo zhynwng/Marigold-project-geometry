@@ -1,0 +1,4 @@
+name: kandinsky_indoor_field
+disp_name: field_train
+dir: /scratch/yz5880/mini
+filenames: /scratch/yz5880/mini_list.txt
