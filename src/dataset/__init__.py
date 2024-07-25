@@ -40,6 +40,7 @@ dataset_name_class_dict = {
     "eth3d": ETH3DDataset,
     "diode": DIODEDataset,
     "scannet": ScanNetDataset,
+    "kandinsky_indoor_field": BaseDepthDataset
 }
 
 
