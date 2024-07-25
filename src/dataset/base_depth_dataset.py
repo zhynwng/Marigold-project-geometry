@@ -198,7 +198,10 @@ class BaseDepthDataset(Dataset):
             image_to_read = io.BytesIO(image_to_read)
         else:
             image_to_read = os.path.join(self.dataset_dir, img_rel_path)
-        image = Image.open(image_to_read)  # [H, W, rgb]
+        if image_to_read.endswith('.pt'):
+            image = torch.load(image_to_read)['pred_gravity_original'] #flag
+        else:
+            image = Image.open(image_to_read)  # [H, W, rgb]
         image = np.asarray(image)
         return image
 
