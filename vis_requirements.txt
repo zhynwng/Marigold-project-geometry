@@ -1,0 +1,14 @@
+albumentations
+matplotlib
+numpy
+omegaconf
+opencv-contrib-python
+pillow
+pyequilib==0.3.0
+scikit-learn
+scipy
+setuptools
+timm
+torch
+torchvision
+yacs
