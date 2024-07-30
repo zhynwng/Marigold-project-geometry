@@ -23,6 +23,7 @@ from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 from transformers import PreTrainedModel, PretrainedConfig
 
+
 from .util.batchsize import find_batch_size
 from .util.ensemble import ensemble_depth
 from .util.image_util import (
@@ -32,6 +33,7 @@ from .util.image_util import (
     resize_max_res,
 )
 
+from perspective2d.utils import draw_perspective_fields
 
 
 
@@ -48,7 +50,7 @@ class FinetuneOutput(BaseOutput):
 
     image: Image.Image
     field: np.ndarray
-    field_visualized: np.ndarray
+    field_visualized: Optional[np.ndarray]
 
 
 
@@ -130,10 +132,12 @@ class FinetunePipeline(DiffusionPipeline):
 
         self.empty_text_embed = None
 
+        self.latent_shape = self.unet.conv_in
+
     @torch.no_grad()
     def __call__(
         self,
-        input_image: Union[Image.Image, torch.Tensor],
+        input_prompts: Optional[torch.Tensor] = None,
         denoising_steps: Optional[int] = None,
         ensemble_size: int = 5,
         processing_res: Optional[int] = None,
@@ -144,13 +148,12 @@ class FinetunePipeline(DiffusionPipeline):
         color_map: str = "Spectral",
         show_progress_bar: bool = True,
         ensemble_kwargs: Dict = None,
-    ) -> MarigoldDepthOutput:
+    ) -> FinetuneOutput:
         """
         Function invoked when calling the pipeline.
 
         Args:
-            input_image (`Image`):
-                Input RGB (or gray-scale) image.
+            input_prompts : Optional?
             denoising_steps (`int`, *optional*, defaults to `None`):
                 Number of denoising diffusion steps during inference. The default value `None` results in automatic
                 selection. The number of steps should be at least 10 with the full Marigold models, and between 1 and 4
@@ -203,89 +206,44 @@ class FinetunePipeline(DiffusionPipeline):
         resample_method: InterpolationMode = get_tv_resample_method(resample_method)
 
 
-        # ----------------- generating Image and field -----------------
-        # Batch repeated input image
-        duplicated_rgb = rgb_norm.expand(ensemble_size, -1, -1, -1)
-        single_rgb_dataset = TensorDataset(duplicated_rgb)
-        if batch_size > 0:
-            _bs = batch_size
-        else:
-            _bs = find_batch_size(
-                ensemble_size=ensemble_size,
-                input_res=max(rgb_norm.shape[1:]),
-                dtype=self.dtype,
-            )
-
-        single_rgb_loader = DataLoader( #flag
-            single_rgb_dataset, batch_size=_bs, shuffle=False
-        )
-
-        # Predict depth maps (batched)
-        depth_pred_ls = []
+        # ----------------- generating Image and field ----------------
+        # generate  image and field maps (batched)
+        field_ls = []
+        image_ls = []
         if show_progress_bar:
             iterable = tqdm(
-                single_rgb_loader, desc=" " * 2 + "Inference batches", leave=False
+                range(batch), desc=" " * 2 + "Inference batches", leave=False
             )
         else:
-            iterable = single_rgb_loader
+            iterable = range(batch)
         for batch in iterable:
-            (batched_img,) = batch
-            depth_pred_raw = self.single_infer( #flag
-                rgb_in=batched_img,
+            image, field = self.single_infer( #flag,
                 num_inference_steps=denoising_steps,
                 show_pbar=show_progress_bar,
                 generator=generator,
             )
-            depth_pred_ls.append(depth_pred_raw.detach())
-        depth_preds = torch.concat(depth_pred_ls, dim=0)
+            image_ls.append(image.detach())
+            field_ls.append(field.detach())
+
+
+        image_preds = torch.concat(image_ls, dim=0)
+        field_preds = torch.concat(field_ls, dim=0)
         torch.cuda.empty_cache()  # clear vram cache for ensembling
 
         # ----------------- Test-time ensembling -----------------
-        if ensemble_size > 1:
-            depth_pred, pred_uncert = ensemble_depth(
-                depth_preds,
-                scale_invariant=self.scale_invariant,
-                shift_invariant=self.shift_invariant,
-                max_res=50,
-                **(ensemble_kwargs or {}),
-            )
-        else:
-            depth_pred = depth_preds
-            pred_uncert = None
-
-        # Resize back to original resolution
-        if match_input_res:
-            depth_pred = resize(
-                depth_pred,
-                input_size[-2:],
-                interpolation=resample_method,
-                antialias=True,
-            )
 
         # Convert to numpy
-        depth_pred = depth_pred.squeeze()
-        depth_pred = depth_pred.cpu().numpy()
-        if pred_uncert is not None:
-            pred_uncert = pred_uncert.squeeze().cpu().numpy()
+        image_pred = image_preds.squeeze().cpu().numpy()
+        field_pred = field_preds.squeeze().cpu().numpy()
 
-        # Clip output range
-        depth_pred = depth_pred.clip(0, 1)
+       # Visualize; would need further work
+        #field_visualized =  draw_perspective_fields(image_pred, field_pred[:, : 2], torch.deg2rad(field_pred[:, 2]))
 
-        # Colorize
-        if color_map is not None:
-            depth_colored = colorize_depth_maps(
-                depth_pred, 0, 1, cmap=color_map
-            ).squeeze()  # [3, H, W], value in (0, 1)
-            depth_colored = (depth_colored * 255).astype(np.uint8)
-            depth_colored_hwc = chw2hwc(depth_colored)
-            depth_colored_img = Image.fromarray(depth_colored_hwc)
-        else:
-            depth_colored_img = None
 
-        return MarigoldDepthOutput(
-            depth_np=depth_pred,
-            depth_colored=depth_colored_img,
-            uncertainty=pred_uncert,
+        return FinetuneOutput (
+            image = image_pred,
+            field_pred = field_pred, 
+            field_visualized = None,
         )
 
     def _check_inference_step(self, n_step: int) -> None:
@@ -327,10 +285,11 @@ class FinetunePipeline(DiffusionPipeline):
     @torch.no_grad()
     def single_infer(
         self,
+        noise: torch.Tensor, 
         num_inference_steps: int,
         generator: Union[torch.Generator, None],
         show_pbar: bool,
-    ) -> (torch.Tensor, torch.Tensor):
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Perform an individual generation of field and image
 
@@ -352,17 +311,17 @@ class FinetunePipeline(DiffusionPipeline):
 
         # Initial depth map (noise)
         cat_latent = torch.randn(
-            rgb_latent.shape,
+            self.latent_shape,
             device=device,
             dtype=self.dtype,
             generator=generator,
-        )  # [B, 4, h, w]
+        )  # [B, 8, h, w]
 
         # Batched empty text embedding
         if self.empty_text_embed is None:
             self.encode_empty_text()
         batch_empty_text_embed = self.empty_text_embed.repeat(
-            (rgb_latent.shape[0], 1, 1)
+            (self.latent_shape[0], 1, 1)
         ).to(device)  # [B, 2, 1024]
 
         # Denoising loop
@@ -420,11 +379,11 @@ class FinetunePipeline(DiffusionPipeline):
         field_latent = mean * self.field_latent_scale_factor
 
         # concat the latents
-        cat_latent = torch.cat([rgb_latent, depth_latent], dim=1)
+        cat_latent = torch.cat([rgb_latent, field_latent], dim=1)
 
         return cat_latent
 
-    def decode_latent(self, cat_latent: torch.Tensor) -> (torch.Tensor, torch.Tensor):
+    def decode_latent(self, cat_latent: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Decode latent into image and field
 
@@ -440,7 +399,7 @@ class FinetunePipeline(DiffusionPipeline):
         rgb_latent, field_latent = torch.tensor_split(cat_latent, 2, dim=1)
 
         # scale latent
-        rgb_latent = rbg_latent / self.rgb_latent_scale_factor
+        rgb_latent = rgb_latent / self.rgb_latent_scale_factor
         # decode
         z_rgb = self.vae.post_quant_conv(rgb_latent)
         stacked_rgb = self.vae.decoder(z_rgb)
@@ -451,7 +410,7 @@ class FinetunePipeline(DiffusionPipeline):
         field_latent = field_latent / self.field_latent_scale_factor
         # decode
         z_field = self.vae.post_quant_conv(field_latent)
-        stacked = self.vae.decoder(z_field)
+        stacked_field = self.vae.decoder(z_field)
         # mean of output channels
         field_mean = stacked_field.mean(dim=1, keepdim=True)
 
