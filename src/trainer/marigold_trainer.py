@@ -27,6 +27,7 @@ import os
 import shutil
 from datetime import datetime
 from typing import List, Union
+import sys
 
 import numpy as np
 import torch
@@ -39,8 +40,9 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from PIL import Image
+import matplotlib.pyplot as plt
 
-from marigold.marigold_pipeline import MarigoldPipeline, MarigoldDepthOutput
+from marigold.finetune_pipeline import FinetunePipeline, MarigoldDepthOutput
 from src.util import metric
 from src.util.data_loader import skip_first_batches
 from src.util.logging_util import tb_logger, eval_dic_to_text
@@ -52,11 +54,11 @@ from src.util.alignment import align_depth_least_square
 from src.util.seeding import generate_seed_sequence
 
 
-class MarigoldTrainer:
+class FinetuneTrainer:
     def __init__(
         self,
         cfg: OmegaConf,
-        model: MarigoldPipeline,
+        model: FinetunePipeline,
         train_dataloader: DataLoader,
         device,
         base_ckpt_dir,
@@ -84,9 +86,6 @@ class MarigoldTrainer:
         # Adapt input layers
         if 8 != self.model.unet.config["in_channels"]:
             self._replace_unet_conv_in()
-        if 8 != self.model.unet.config["out_channels"]:
-            self._replace_unet_conv_out()
-        
 
         # Encode empty text prompt
         self.model.encode_empty_text()
@@ -189,27 +188,6 @@ class MarigoldTrainer:
         self.model.unet.config["in_channels"] = 8
         logging.info("Unet config is updated")
         return
-    
-    def _replace_unet_conv_out(self):
-        # replace the last layer to output 8 in_channels
-        _weight = self.model.unet.conv_out.weight.clone()  # [320, 4, 3, 3]
-        _bias = self.model.unet.conv_out.bias.clone()  # [320]
-        _weight = _weight.repeat((1, 2, 1, 1))  # Keep selected channel(s)
-        # half the activation magnitude
-        _weight *= 0.5
-        # new conv_in channel
-        _n_convout_out_channel = self.model.unet.conv_out.out_channels
-        _new_conv_out = Conv2d(
-            8, _n_convout_out_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
-        )
-        _new_conv_out.weight = Parameter(_weight)
-        _new_conv_out.bias = Parameter(_bias)
-        self.model.unet.conv_out = _new_conv_out
-        logging.info("Unet conv_out layer is replaced")
-        # replace config
-        self.model.unet.config["out_channels"] = 8
-        logging.info("Unet config is updated")
-        return
 
     def train(self, t_end=None):
         logging.info("Start training")
@@ -247,12 +225,28 @@ class MarigoldTrainer:
                 # Get data
                 rgb = batch["image"].to(device).to(torch.float32)
                 field = batch["field"].to(device).to(torch.float32)
+                input = torch.cat((rgb, field), dim=-1)
 
                 batch_size = rgb.shape[0]
 
                 with torch.no_grad():
-                    # Encode image and field
-                    cat_latents = self.model.encode_latent(rgb, field)  # [B, 8, h, w]
+                    # Encode input
+                    input_latent = self.model.encode_rgb(input)  # [B, 4, h, w]
+
+                # print(field.shape)
+                # Convert the tensor to a NumPy array and transpose to (H, W, C)
+                # array = tensor.permute(1, 2, 0).numpy()
+
+                # # Plot the tensor as an image
+                # img_field = field[0].squeeze(0)
+                # plt.imshow(img_field.cpu().numpy().transpose(1, 2, 0))
+                # plt.title('Kandinsky Field Image')
+                # plt.axis('off')  # Hide axes
+
+                # # Save the image to output.png
+                # plt.savefig('output.png', bbox_inches='tight', pad_inches=0)
+                # plt.close()  # Close the plot to free up memory
+                # sys.exit(0)
 
                 # Sample a random timestep for each image
                 timesteps = torch.randint(
@@ -264,16 +258,29 @@ class MarigoldTrainer:
                 ).long()  # [B]
 
                 # Sample noise
-                noise = torch.randn(
-                        cat_latents.shape,
+                if self.apply_multi_res_noise:
+                    strength = self.mr_noise_strength
+                    if self.annealed_mr_noise:
+                        # calculate strength depending on t
+                        strength = strength * (timesteps / self.scheduler_timesteps)
+                    noise = multi_res_noise_like(
+                        gt_depth_latent,
+                        strength=strength,
+                        downscale_strategy=self.mr_noise_downscale_strategy,
+                        generator=rand_num_generator,
+                        device=device,
+                    )
+                else:
+                    noise = torch.randn(
+                        gt_depth_latent.shape,
                         device=device,
                         generator=rand_num_generator,
-                    )  # [B, 8, h, w]
+                    )  # [B, 4, h, w]
 
                 # Add noise to the latents (diffusion forward process)
                 noisy_latents = self.training_noise_scheduler.add_noise(
-                    cat_latents, noise, timesteps
-                )  # [B, 8, h, w]
+                    gt_depth_latent, noise, timesteps
+                )  # [B, 4, h, w]
 
                 # Text embedding
                 text_embed = self.empty_text_embed.to(device).repeat(
@@ -281,18 +288,38 @@ class MarigoldTrainer:
                 )  # [B, 77, 1024]
 
 
+                # Concat rgb and depth latents
+                cat_latents = torch.cat(
+                    [rgb_latent, noisy_latents], dim=1
+                )  # [B, 8, h, w]
+                cat_latents = cat_latents.float()
+
                 # Predict the noise residual
                 model_pred = self.model.unet(
                     cat_latents, timesteps, text_embed
-                ).sample  # [B, 8, h, w]
+                ).sample  # [B, 4, h, w]
                 if torch.isnan(model_pred).any():
                     logging.warning("model_pred contains NaN.")
 
-                # Get the target for loss depending on the prediction type
-                target = noise
+                # Get the target for loss depending on the prediction type #flag
+                if "sample" == self.prediction_type:
+                    target = gt_depth_latent
+                elif "epsilon" == self.prediction_type:
+                    target = noise
+                elif "v_prediction" == self.prediction_type:
+                    target = self.training_noise_scheduler.get_velocity(
+                        gt_depth_latent, noise, timesteps
+                    )  # [B, 4, h, w]
+                else:
+                    raise ValueError(f"Unknown prediction type {self.prediction_type}")
 
-
-                #  latent loss
+                # Masked latent loss
+                #if self.gt_mask_type is not None:
+                #    latent_loss = self.loss(
+                #        model_pred[valid_mask_down].float(),
+                #        target[valid_mask_down].float(),
+                #    )
+                #else:
                 latent_loss = self.loss(model_pred.float(), target.float())
 
                 loss = latent_loss.mean()
@@ -362,9 +389,22 @@ class MarigoldTrainer:
             # Epoch end
             self.n_batch_in_epoch = 0
 
-
+    def encode_depth(self, depth_in):
+        # stack depth into 3-channel
+        stacked = self.stack_depth_images(depth_in)
+        # encode using VAE encoder
+        depth_latent = self.model.encode_rgb(stacked)
+        return depth_latent
 
     @staticmethod
+    def stack_depth_images(depth_in):
+        if 4 == len(depth_in.shape):
+            stacked = depth_in.repeat(1, 3, 1, 1)
+        elif 3 == len(depth_in.shape):
+            stacked = depth_in.unsqueeze(1)
+            stacked = depth_in.repeat(1, 3, 1, 1)
+        return stacked
+
     def _train_step_callback(self):
         """Executed after every iteration"""
         # Save backup (with a larger interval, without training states)

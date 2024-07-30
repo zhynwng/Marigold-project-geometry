@@ -132,7 +132,7 @@ class FinetunePipeline(DiffusionPipeline):
 
         self.empty_text_embed = None
 
-        self.latent_shape = self.unet.conv_in
+        self.latent_shape = None
 
     @torch.no_grad()
     def __call__(
