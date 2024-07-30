@@ -26,6 +26,7 @@ import random
 import tarfile
 from enum import Enum
 from typing import Union
+import sys
 
 import numpy as np
 import torch
@@ -64,10 +65,10 @@ class BaseDepthDataset(Dataset):
         filename_ls_path: str,
         dataset_dir: str,
         disp_name: str,
-        min_depth: float,
-        max_depth: float,
-        has_filled_depth: bool,
-        name_mode: DepthFileNameMode,
+        min_depth: float = 1e-3,
+        max_depth: float = 10,
+        has_filled_depth: bool = False,
+        name_mode: DepthFileNameMode = DepthFileNameMode.id,
         depth_transform: Union[DepthNormalizerBase, None] = None,
         augmentation_args: dict = None,
         resize_to_hw=None,
@@ -114,40 +115,18 @@ class BaseDepthDataset(Dataset):
         return len(self.filenames)
 
     def __getitem__(self, index):
-        rasters, other = self._get_data_item(index)
-        if DatasetMode.TRAIN == self.mode:
-            rasters = self._training_preprocess(rasters)
-        # merge
-        outputs = rasters
-        outputs.update(other)
-        return outputs
+        batch = self._get_data_item(index)
+        return batch
 
     def _get_data_item(self, index):
-        rgb_rel_path, depth_rel_path, filled_rel_path = self._get_data_path(index=index)
+        img_rel_path, field_rel_path, filled_rel_path = self._get_data_path(index=index)
 
-        rasters = {}
+        batch = {}
 
-        # RGB data
-        rasters.update(self._load_rgb_data(rgb_rel_path=rgb_rel_path))
+        batch["image"] = self._read_image(img_rel_path)
+        batch["field"] = self._read_image(field_rel_path)
 
-        # Depth data
-        if DatasetMode.RGB_ONLY != self.mode:
-            # load data
-            depth_data = self._load_depth_data(
-                depth_rel_path=depth_rel_path, filled_rel_path=filled_rel_path
-            )
-            rasters.update(depth_data)
-            # valid mask
-            rasters["valid_mask_raw"] = self._get_valid_mask(
-                rasters["depth_raw_linear"]
-            ).clone()
-            rasters["valid_mask_filled"] = self._get_valid_mask(
-                rasters["depth_filled_linear"]
-            ).clone()
-
-        other = {"index": index, "rgb_relative_path": rgb_rel_path}
-
-        return rasters, other
+        return batch
 
     def _load_rgb_data(self, rgb_rel_path):
         # Read RGB data
@@ -199,15 +178,28 @@ class BaseDepthDataset(Dataset):
         else:
             image_to_read = os.path.join(self.dataset_dir, img_rel_path)
         if image_to_read.endswith('.pt'):
-            image = torch.load(image_to_read)['pred_gravity_original'] #flag
+            field = torch.load(image_to_read)
+            # print("gravity shape:", field['pred_gravity_original'].shape)
+            # print("latitude shape:", field['pred_latitude_original'].shape)
+            latitude_map = field['pred_latitude_original']
+            gravity_maps = field['pred_gravity_original']
+            joined_maps = self.transform_maps(latitude_map,  gravity_maps)
         else:
             image = Image.open(image_to_read)  # [H, W, rgb]
+            image = np.transpose(image, (2, 0, 1)).astype(float)
+
         image = np.asarray(image)
         return image
 
+    def transform_maps(self, latitude_map, gravity_maps):
+        latitude_map = latitude_map / 90.0
+        joined_maps = torch.cat([latitude_map.unsqueeze(0), gravity_maps], dim = 0)
+
+        return joined_maps
+
     def _read_rgb_file(self, rel_path) -> np.ndarray:
         rgb = self._read_image(rel_path)
-        rgb = np.transpose(rgb, (2, 0, 1)).astype(int)  # [rgb, H, W]
+        # rgb = np.transpose(rgb, (2, 0, 1)).astype(int)  # [rgb, H, W]
         return rgb
 
     def _read_depth_file(self, rel_path):
