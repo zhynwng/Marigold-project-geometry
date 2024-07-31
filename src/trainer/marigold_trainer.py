@@ -27,6 +27,7 @@ import os
 import shutil
 from datetime import datetime
 from typing import List, Union
+import sys
 
 import numpy as np
 import torch
@@ -39,8 +40,9 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from PIL import Image
+import matplotlib.pyplot as plt
 
-from marigold.marigold_pipeline import MarigoldPipeline, MarigoldDepthOutput
+from marigold.finetune_pipeline import FinetunePipeline, MarigoldDepthOutput
 from src.util import metric
 from src.util.data_loader import skip_first_batches
 from src.util.logging_util import tb_logger, eval_dic_to_text
@@ -52,11 +54,11 @@ from src.util.alignment import align_depth_least_square
 from src.util.seeding import generate_seed_sequence
 
 
-class MarigoldTrainer:
+class FinetuneTrainer:
     def __init__(
         self,
         cfg: OmegaConf,
-        model: MarigoldPipeline,
+        model: FinetunePipeline,
         train_dataloader: DataLoader,
         device,
         base_ckpt_dir,
@@ -221,28 +223,30 @@ class MarigoldTrainer:
                 # >>> With gradient accumulation >>>
 
                 # Get data
-                rgb = batch["rgb_norm"].to(device)
-                depth_gt_for_latent = batch[self.gt_depth_type].to(device)
-
-                if self.gt_mask_type is not None:
-                    valid_mask_for_latent = batch[self.gt_mask_type].to(device)
-                    invalid_mask = ~valid_mask_for_latent
-                    valid_mask_down = ~torch.max_pool2d(
-                        invalid_mask.float(), 8, 8
-                    ).bool()
-                    valid_mask_down = valid_mask_down.repeat((1, 4, 1, 1))
-                else:
-                    raise NotImplementedError
+                rgb = batch["image"].to(device).to(torch.float32)
+                field = batch["field"].to(device).to(torch.float32)
+                input = torch.cat((rgb, field), dim=-1)
 
                 batch_size = rgb.shape[0]
 
                 with torch.no_grad():
-                    # Encode image
-                    rgb_latent = self.model.encode_rgb(rgb)  # [B, 4, h, w]
-                    # Encode GT depth
-                    gt_depth_latent = self.encode_depth(
-                        depth_gt_for_latent
-                    )  # [B, 4, h, w]
+                    # Encode input
+                    input_latent = self.model.encode_rgb(input)  # [B, 4, h, w]
+
+                # print(field.shape)
+                # Convert the tensor to a NumPy array and transpose to (H, W, C)
+                # array = tensor.permute(1, 2, 0).numpy()
+
+                # # Plot the tensor as an image
+                # img_field = field[0].squeeze(0)
+                # plt.imshow(img_field.cpu().numpy().transpose(1, 2, 0))
+                # plt.title('Kandinsky Field Image')
+                # plt.axis('off')  # Hide axes
+
+                # # Save the image to output.png
+                # plt.savefig('output.png', bbox_inches='tight', pad_inches=0)
+                # plt.close()  # Close the plot to free up memory
+                # sys.exit(0)
 
                 # Sample a random timestep for each image
                 timesteps = torch.randint(
@@ -283,6 +287,7 @@ class MarigoldTrainer:
                     (batch_size, 1, 1)
                 )  # [B, 77, 1024]
 
+
                 # Concat rgb and depth latents
                 cat_latents = torch.cat(
                     [rgb_latent, noisy_latents], dim=1
@@ -296,7 +301,7 @@ class MarigoldTrainer:
                 if torch.isnan(model_pred).any():
                     logging.warning("model_pred contains NaN.")
 
-                # Get the target for loss depending on the prediction type
+                # Get the target for loss depending on the prediction type #flag
                 if "sample" == self.prediction_type:
                     target = gt_depth_latent
                 elif "epsilon" == self.prediction_type:
@@ -309,13 +314,13 @@ class MarigoldTrainer:
                     raise ValueError(f"Unknown prediction type {self.prediction_type}")
 
                 # Masked latent loss
-                if self.gt_mask_type is not None:
-                    latent_loss = self.loss(
-                        model_pred[valid_mask_down].float(),
-                        target[valid_mask_down].float(),
-                    )
-                else:
-                    latent_loss = self.loss(model_pred.float(), target.float())
+                #if self.gt_mask_type is not None:
+                #    latent_loss = self.loss(
+                #        model_pred[valid_mask_down].float(),
+                #        target[valid_mask_down].float(),
+                #    )
+                #else:
+                latent_loss = self.loss(model_pred.float(), target.float())
 
                 loss = latent_loss.mean()
 
@@ -427,8 +432,8 @@ class MarigoldTrainer:
             self.save_checkpoint(ckpt_name="latest", save_train_state=True)
 
         # Visualization
-        if self.vis_period > 0 and 0 == self.effective_iter % self.vis_period:
-            self.visualize()
+        #if self.vis_period > 0 and 0 == self.effective_iter % self.vis_period:
+        #    self.visualize()
 
     def validate(self):
         for i, val_loader in enumerate(self.val_loaders):
@@ -572,11 +577,11 @@ class MarigoldTrainer:
                 metric_tracker.update(_metric_name, _metric)
 
             # Save as 16-bit uint png
-            if save_to_dir is not None:
-                img_name = batch["rgb_relative_path"][0].replace("/", "_")
-                png_save_path = os.path.join(save_to_dir, f"{img_name}.png")
-                depth_to_save = (pipe_out.depth_np * 65535.0).astype(np.uint16)
-                Image.fromarray(depth_to_save).save(png_save_path, mode="I;16")
+            #if save_to_dir is not None:
+            #    img_name = batch["rgb_relative_path"][0].replace("/", "_")
+            #    png_save_path = os.path.join(save_to_dir, f"{img_name}.png")
+            #    depth_to_save = (pipe_out.depth_np * 65535.0).astype(np.uint16)
+            #    Image.fromarray(depth_to_save).save(png_save_path, mode="I;16")
 
         return metric_tracker.result()
 

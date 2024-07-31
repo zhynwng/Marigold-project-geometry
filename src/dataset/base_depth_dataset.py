@@ -183,7 +183,7 @@ class BaseDepthDataset(Dataset):
             # print("latitude shape:", field['pred_latitude_original'].shape)
             latitude_map = field['pred_latitude_original']
             gravity_maps = field['pred_gravity_original']
-            joined_maps = self.transform_maps(latitude_map,  gravity_maps)
+            image = self.transform_maps(latitude_map,  gravity_maps)
         else:
             image = Image.open(image_to_read)  # [H, W, rgb]
             image = np.transpose(image, (2, 0, 1)).astype(float)
