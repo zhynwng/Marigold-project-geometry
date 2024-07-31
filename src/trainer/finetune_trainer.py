@@ -40,6 +40,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from PIL import Image
 
+# from marigold.marigold_pipeline import MarigoldPipeline, MarigoldDepthOutput
 from marigold.finetune_pipeline import FinetunePipeline, FinetuneOutput
 from src.util import metric
 from src.util.data_loader import skip_first_batches
@@ -84,8 +85,8 @@ class FinetuneTrainer:
         # Adapt input layers
         if 8 != self.model.unet.config["in_channels"]:
             self._replace_unet_conv_in()
-        if 8 != self.model.unet.config["out_channels"]:
-            self._replace_unet_conv_out()
+        # if 8 != self.model.unet.config["out_channels"]:
+        #     self._replace_unet_conv_out()
         
 
         # Encode empty text prompt
@@ -252,10 +253,12 @@ class FinetuneTrainer:
                 field = batch["field"].to(device).to(torch.float32)
 
                 batch_size = rgb.shape[0]
+                print("batch size", batch_size)
 
                 with torch.no_grad():
                     # Encode image and field
                     cat_latents = self.model.encode_latent(rgb, field)  # [B, 8, h, w]
+                    # print("cat latents shape", cat_latents.shape)
 
                     if self.model.latent_shape is None: 
                         self.model.latent_shape = cat_latents.shape
@@ -279,15 +282,22 @@ class FinetuneTrainer:
                 noisy_latents = self.training_noise_scheduler.add_noise(
                     cat_latents, noise, timesteps
                 )  # [B, 8, h, w]
+                # print("noisy latents shape", noisy_latents.shape)
 
                 # Text embedding
                 text_embed = self.empty_text_embed.to(device).repeat(
                     (batch_size, 1, 1)
                 )  # [B, 77, 1024]
+                # _embed = torch.ones(2, 77, 1024).to(device)
+                # _embed[:, :2, :] = text_embed
+                # print("text embed shape", _embed.shape)
 
 
                 # Predict the noise residual
-                model_pred = self.model.unet(
+                print("cat_latents", noisy_latents.shape)
+                print("time steps", timesteps)
+                print("text embed", text_embed.shape)
+                model_pred = self.model.unet( #flag
                     noisy_latents, timesteps, text_embed
                 ).sample  # [B, 8, h, w]
                 if torch.isnan(model_pred).any():

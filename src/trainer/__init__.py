@@ -2,7 +2,6 @@
 # Last modified: 2024-05-17
 
 from .marigold_trainer import MarigoldTrainer
-
 from .finetune_trainer import FinetuneTrainer
 
 
