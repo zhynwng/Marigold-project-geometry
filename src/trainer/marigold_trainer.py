@@ -42,7 +42,7 @@ from tqdm import tqdm
 from PIL import Image
 import matplotlib.pyplot as plt
 
-from marigold.finetune_pipeline import FinetunePipeline, MarigoldDepthOutput
+from marigold.marigold_pipeline import MarigoldPipeline, MarigoldDepthOutput
 from src.util import metric
 from src.util.data_loader import skip_first_batches
 from src.util.logging_util import tb_logger, eval_dic_to_text
@@ -54,11 +54,11 @@ from src.util.alignment import align_depth_least_square
 from src.util.seeding import generate_seed_sequence
 
 
-class FinetuneTrainer:
+class MarigoldTrainer:
     def __init__(
         self,
         cfg: OmegaConf,
-        model: FinetunePipeline,
+        model: MarigoldPipeline,
         train_dataloader: DataLoader,
         device,
         base_ckpt_dir,

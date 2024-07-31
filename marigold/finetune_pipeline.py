@@ -33,7 +33,7 @@ from .util.image_util import (
     resize_max_res,
 )
 
-from perspective2d.utils import draw_perspective_fields
+#from perspective2d.utils import draw_perspective_fields
 
 
 

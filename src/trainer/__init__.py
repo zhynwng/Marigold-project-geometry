@@ -3,9 +3,12 @@
 
 from .marigold_trainer import MarigoldTrainer
 
+from .finetune_trainer import FinetuneTrainer
+
 
 trainer_cls_name_dict = {
     "MarigoldTrainer": MarigoldTrainer,
+    "FinetuneTrainer": FinetuneTrainer,
 }
 
 

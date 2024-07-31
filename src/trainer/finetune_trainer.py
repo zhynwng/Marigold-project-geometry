@@ -40,7 +40,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from PIL import Image
 
-from marigold.marigold_pipeline import MarigoldPipeline, MarigoldDepthOutput
+from marigold.finetune_pipeline import FinetunePipeline, FinetuneOutput
 from src.util import metric
 from src.util.data_loader import skip_first_batches
 from src.util.logging_util import tb_logger, eval_dic_to_text
@@ -52,11 +52,11 @@ from src.util.alignment import align_depth_least_square
 from src.util.seeding import generate_seed_sequence
 
 
-class MarigoldTrainer:
+class FinetuneTrainer:
     def __init__(
         self,
         cfg: OmegaConf,
-        model: MarigoldPipeline,
+        model: FinetunePipeline,
         train_dataloader: DataLoader,
         device,
         base_ckpt_dir,
@@ -68,7 +68,7 @@ class MarigoldTrainer:
         vis_dataloaders: List[DataLoader] = None,
     ):
         self.cfg: OmegaConf = cfg
-        self.model: MarigoldPipeline = model
+        self.model: FinetunePipeline = model
         self.device = device
         self.seed: Union[int, None] = (
             self.cfg.trainer.init_seed
@@ -192,10 +192,10 @@ class MarigoldTrainer:
     
     def _replace_unet_conv_out(self):
         # replace the last layer to output 8 in_channels
-        _weight = self.model.unet.conv_out.weight.clone()  # [320, 4, 3, 3]
-        logging.info("weight shape", _weight.shape)
-        _bias = self.model.unet.conv_out.bias.clone()  # [320]
-        _weight = _weight.repeat((1, 2, 1, 1))  # Keep selected channel(s)
+        _weight = self.model.unet.conv_out.weight.clone()  # [4, 320, 3, 3]
+        _bias = self.model.unet.conv_out.bias.clone()  # [4]
+        _weight = _weight.repeat((2, 1, 1, 1))  # Keep selected channel(s)
+        _bias = _bias.repeat((2))
         # half the activation magnitude
         _weight *= 0.5
         # new conv_in channel
@@ -203,8 +203,10 @@ class MarigoldTrainer:
         _new_conv_out = Conv2d(
              _n_convout_in_channel, 8, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
         )
+        
         _new_conv_out.weight = Parameter(_weight)
         _new_conv_out.bias = Parameter(_bias)
+
         self.model.unet.conv_out = _new_conv_out
         logging.info("Unet conv_out layer is replaced")
         # replace config
@@ -342,7 +344,7 @@ class MarigoldTrainer:
                     self.train_metrics.reset()
 
                     # Per-step callback
-                    self._train_step_callback()
+                    #self._train_step_callback()
 
                     # End of training
                     if self.max_iter > 0 and self.effective_iter >= self.max_iter:
@@ -492,7 +494,7 @@ class MarigoldTrainer:
                 generator.manual_seed(seed)
 
             # Predict depth
-            pipe_out: MarigoldDepthOutput = self.model(
+            pipe_out: FinetuneOutput = self.model(
                 rgb_int,
                 denoising_steps=self.cfg.validation.denoising_steps,
                 ensemble_size=self.cfg.validation.ensemble_size,
