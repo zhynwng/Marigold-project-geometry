@@ -26,6 +26,7 @@ import random
 import tarfile
 from enum import Enum
 from typing import Union
+import sys
 
 import numpy as np
 import torch
@@ -178,14 +179,23 @@ class BaseDepthDataset(Dataset):
             image_to_read = os.path.join(self.dataset_dir, img_rel_path)
         if image_to_read.endswith('.pt'):
             field = torch.load(image_to_read)
-            lat = field['pred_latitude_original'].unsqueeze(0)
-            image = torch.cat((field['pred_gravity_original'], lat), dim=0).to(torch.float32)
+            # print("gravity shape:", field['pred_gravity_original'].shape)
+            # print("latitude shape:", field['pred_latitude_original'].shape)
+            latitude_map = field['pred_latitude_original']
+            gravity_maps = field['pred_gravity_original']
+            image = self.transform_maps(latitude_map,  gravity_maps)
         else:
             image = Image.open(image_to_read)  # [H, W, rgb]
             image = np.transpose(image, (2, 0, 1)).astype(float)
 
         image = np.asarray(image)
         return image
+
+    def transform_maps(self, latitude_map, gravity_maps):
+        latitude_map = latitude_map / 90.0
+        joined_maps = torch.cat([latitude_map.unsqueeze(0), gravity_maps], dim = 0)
+
+        return joined_maps
 
     def _read_rgb_file(self, rel_path) -> np.ndarray:
         rgb = self._read_image(rel_path)
