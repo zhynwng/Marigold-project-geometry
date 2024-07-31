@@ -33,7 +33,7 @@ from .util.image_util import (
     resize_max_res,
 )
 
-from perspective2d.utils import draw_perspective_fields
+# from perspective2d.utils import draw_perspective_fields
 
 
 
@@ -379,6 +379,8 @@ class FinetunePipeline(DiffusionPipeline):
         field_latent = mean * self.field_latent_scale_factor
 
         # concat the latents
+        # print("rgb latent shape", rgb_latent.shape)
+        # print("field latent shape", field_latent.shape)
         cat_latent = torch.cat([rgb_latent, field_latent], dim=1)
 
         return cat_latent

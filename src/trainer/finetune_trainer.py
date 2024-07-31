@@ -40,7 +40,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from PIL import Image
 
-from marigold.marigold_pipeline import MarigoldPipeline, MarigoldDepthOutput
+# from marigold.marigold_pipeline import MarigoldPipeline, MarigoldDepthOutput
+from marigold.finetune_pipeline import FinetunePipeline, FinetuneOutput
 from src.util import metric
 from src.util.data_loader import skip_first_batches
 from src.util.logging_util import tb_logger, eval_dic_to_text
@@ -52,11 +53,11 @@ from src.util.alignment import align_depth_least_square
 from src.util.seeding import generate_seed_sequence
 
 
-class MarigoldTrainer:
+class FinetuneTrainer:
     def __init__(
         self,
         cfg: OmegaConf,
-        model: MarigoldPipeline,
+        model: FinetunePipeline,
         train_dataloader: DataLoader,
         device,
         base_ckpt_dir,
@@ -68,7 +69,7 @@ class MarigoldTrainer:
         vis_dataloaders: List[DataLoader] = None,
     ):
         self.cfg: OmegaConf = cfg
-        self.model: MarigoldPipeline = model
+        self.model: FinetunePipeline = model
         self.device = device
         self.seed: Union[int, None] = (
             self.cfg.trainer.init_seed
@@ -84,8 +85,8 @@ class MarigoldTrainer:
         # Adapt input layers
         if 8 != self.model.unet.config["in_channels"]:
             self._replace_unet_conv_in()
-        if 8 != self.model.unet.config["out_channels"]:
-            self._replace_unet_conv_out()
+        # if 8 != self.model.unet.config["out_channels"]:
+        #     self._replace_unet_conv_out()
         
 
         # Encode empty text prompt
@@ -250,10 +251,12 @@ class MarigoldTrainer:
                 field = batch["field"].to(device).to(torch.float32)
 
                 batch_size = rgb.shape[0]
+                print("batch size", batch_size)
 
                 with torch.no_grad():
                     # Encode image and field
                     cat_latents = self.model.encode_latent(rgb, field)  # [B, 8, h, w]
+                    # print("cat latents shape", cat_latents.shape)
 
                     if self.model.latent_shape is None: 
                         self.model.latent_shape = cat_latents.shape
@@ -277,15 +280,22 @@ class MarigoldTrainer:
                 noisy_latents = self.training_noise_scheduler.add_noise(
                     cat_latents, noise, timesteps
                 )  # [B, 8, h, w]
+                # print("noisy latents shape", noisy_latents.shape)
 
                 # Text embedding
                 text_embed = self.empty_text_embed.to(device).repeat(
                     (batch_size, 1, 1)
                 )  # [B, 77, 1024]
+                # _embed = torch.ones(2, 77, 1024).to(device)
+                # _embed[:, :2, :] = text_embed
+                # print("text embed shape", _embed.shape)
 
 
                 # Predict the noise residual
-                model_pred = self.model.unet(
+                print("cat_latents", noisy_latents.shape)
+                print("time steps", timesteps)
+                print("text embed", text_embed.shape)
+                model_pred = self.model.unet( #flag
                     noisy_latents, timesteps, text_embed
                 ).sample  # [B, 8, h, w]
                 if torch.isnan(model_pred).any():
@@ -492,7 +502,7 @@ class MarigoldTrainer:
                 generator.manual_seed(seed)
 
             # Predict depth
-            pipe_out: MarigoldDepthOutput = self.model(
+            pipe_out: FinetuneOutput = self.model(
                 rgb_int,
                 denoising_steps=self.cfg.validation.denoising_steps,
                 ensemble_size=self.cfg.validation.ensemble_size,
