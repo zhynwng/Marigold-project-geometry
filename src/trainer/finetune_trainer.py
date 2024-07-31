@@ -193,14 +193,15 @@ class MarigoldTrainer:
     def _replace_unet_conv_out(self):
         # replace the last layer to output 8 in_channels
         _weight = self.model.unet.conv_out.weight.clone()  # [320, 4, 3, 3]
+        logging.info("weight shape", _weight.shape)
         _bias = self.model.unet.conv_out.bias.clone()  # [320]
         _weight = _weight.repeat((1, 2, 1, 1))  # Keep selected channel(s)
         # half the activation magnitude
         _weight *= 0.5
         # new conv_in channel
-        _n_convout_out_channel = self.model.unet.conv_out.out_channels
+        _n_convout_in_channel = self.model.unet.conv_out.in_channels
         _new_conv_out = Conv2d(
-            8, _n_convout_out_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
+             _n_convout_in_channel, 8, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
         )
         _new_conv_out.weight = Parameter(_weight)
         _new_conv_out.bias = Parameter(_bias)
