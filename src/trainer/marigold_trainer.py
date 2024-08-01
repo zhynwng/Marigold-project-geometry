@@ -480,17 +480,15 @@ class MarigoldTrainer:
                     )
 
     def visualize(self):
-        for val_loader in self.vis_loaders:
-            vis_dataset_name = val_loader.dataset.disp_name
-            vis_out_dir = os.path.join(
-                self.out_dir_vis, self._get_backup_ckpt_name(), vis_dataset_name
-            )
-            os.makedirs(vis_out_dir, exist_ok=True)
-            _ = self.validate_single_dataset(
-                data_loader=val_loader,
-                metric_tracker=self.val_metrics,
-                save_to_dir=vis_out_dir,
-            )
+        vis_out_dir = os.path.join(
+            self.out_dir_vis, self._get_backup_ckpt_name()
+        )
+        os.makedirs(vis_out_dir, exist_ok=True)
+        _ = self.validate_single_dataset(
+            data_loader=self.data_loader,
+            metric_tracker=self.val_metrics,
+            save_to_dir=vis_out_dir,
+        )
 
     @torch.no_grad()
     def validate_single_dataset(
@@ -507,19 +505,12 @@ class MarigoldTrainer:
         val_seed_ls = generate_seed_sequence(val_init_seed, len(data_loader))
 
         for i, batch in enumerate(
-            tqdm(data_loader, desc=f"evaluating on {data_loader.dataset.disp_name}"),
+            tqdm(data_loader[:100], desc=f"evaluating on {data_loader.dataset.disp_name}"),
             start=1,
         ):
             assert 1 == data_loader.batch_size
             # Read input image
-            rgb_int = batch["rgb_int"].squeeze()  # [3, H, W]
-            # GT depth
-            depth_raw_ts = batch["depth_raw_linear"].squeeze()
-            depth_raw = depth_raw_ts.numpy()
-            depth_raw_ts = depth_raw_ts.to(self.device)
-            valid_mask_ts = batch["valid_mask_raw"].squeeze()
-            valid_mask = valid_mask_ts.numpy()
-            valid_mask_ts = valid_mask_ts.to(self.device)
+            rgb_int = batch["image"].to(device).to(torch.float32)
 
             # Random number generator
             seed = val_seed_ls.pop()
@@ -530,7 +521,7 @@ class MarigoldTrainer:
                 generator.manual_seed(seed)
 
             # Predict depth
-            pipe_out: MarigoldDepthOutput = self.model(
+            pipe_out: FinetuneOutput = self.model(
                 rgb_int,
                 denoising_steps=self.cfg.validation.denoising_steps,
                 ensemble_size=self.cfg.validation.ensemble_size,
@@ -543,45 +534,34 @@ class MarigoldTrainer:
                 resample_method=self.cfg.validation.resample_method,
             )
 
-            depth_pred: np.ndarray = pipe_out.depth_np
+            image_pred: Image.Image = pipe_out.image
+            field_pred: np.ndarray = pipe_out.field_pred
+            vis_pred: Image.Image = pipe_out.field_visualized
 
-            if "least_square" == self.cfg.eval.alignment:
-                depth_pred, scale, shift = align_depth_least_square(
-                    gt_arr=depth_raw,
-                    pred_arr=depth_pred,
-                    valid_mask_arr=valid_mask,
-                    return_scale_shift=True,
-                    max_resolution=self.cfg.eval.align_max_res,
-                )
-            else:
-                raise RuntimeError(f"Unknown alignment type: {self.cfg.eval.alignment}")
+            if save_to_dir is not None:
+                output_dir_jpg = os.path.join(save_to_dir, "image")
+                output_dir_field = os.path.join(save_to_dir, "field")
+                output_dir_vis = os.path.join(save_to_dir, "depth_npy")
 
-            # Clip to dataset min max
-            depth_pred = np.clip(
-                depth_pred,
-                a_min=data_loader.dataset.min_depth,
-                a_max=data_loader.dataset.max_depth,
-            )
+                 # save image
+                pred_name_base = i + "_pred"
+                jpg_save_path = os.path.join(output_dir_jpg, f"{pred_name_base}.jpg")
+                if os.path.exists(jpg_save_path):
+                    logging.warning(f"Existing file: '{jpg_save_path}' will be overwritten")
+                image_pred.save(jpg_save_path)
 
-            # clip to d > 0 for evaluation
-            depth_pred = np.clip(depth_pred, a_min=1e-6, a_max=None)
+                # Save field
+                
+                field_save_path = os.path.join(output_dir_field, f"{pred_name_base}.pt")
+                if os.path.exists(field_save_path):
+                    logging.warning(f"Existing file: '{png_save_path}' will be overwritten")
+                torch.save(field_save_path, field_pred)
 
-            # Evaluate
-            sample_metric = []
-            depth_pred_ts = torch.from_numpy(depth_pred).to(self.device)
-
-            for met_func in self.metric_funcs:
-                _metric_name = met_func.__name__
-                _metric = met_func(depth_pred_ts, depth_raw_ts, valid_mask_ts).item()
-                sample_metric.append(_metric.__str__())
-                metric_tracker.update(_metric_name, _metric)
-
-            # Save as 16-bit uint png
-            #if save_to_dir is not None:
-            #    img_name = batch["rgb_relative_path"][0].replace("/", "_")
-            #    png_save_path = os.path.join(save_to_dir, f"{img_name}.png")
-            #    depth_to_save = (pipe_out.depth_np * 65535.0).astype(np.uint16)
-            #    Image.fromarray(depth_to_save).save(png_save_path, mode="I;16")
+                # save visualized image
+                vis_save_path = os.path.join(output_dir_field, f"{pred_name_base}.jpg")
+                if os.path.exists(vis_save_path):
+                    logging.warning(f"Existing file: '{png_save_path}' will be overwritten")
+                vis_pred.save(vis_save_path)
 
         return metric_tracker.result()
 

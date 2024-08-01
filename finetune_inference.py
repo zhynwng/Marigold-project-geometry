@@ -137,13 +137,13 @@ if "__main__" == __name__:
 
     # -------------------- Preparation --------------------
     # Output directories
-    output_dir_color = os.path.join(output_dir, "depth_colored")
-    output_dir_tif = os.path.join(output_dir, "depth_bw")
-    output_dir_npy = os.path.join(output_dir, "depth_npy")
+    output_dir_jpg = os.path.join(output_dir, "image")
+    output_dir_field = os.path.join(output_dir, "field")
+    output_dir_vis = os.path.join(output_dir, "depth_npy")
     os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(output_dir_color, exist_ok=True)
-    os.makedirs(output_dir_tif, exist_ok=True)
-    os.makedirs(output_dir_npy, exist_ok=True)
+    os.makedirs(output_dir_jpg, exist_ok=True)
+    os.makedirs(output_dir_field, exist_ok=True)
+    os.makedirs(output_dir_vis, exist_ok=True)
     logging.info(f"output dir = {output_dir}")
 
     # -------------------- Device --------------------
@@ -239,32 +239,27 @@ if "__main__" == __name__:
             )
             # print(pipe_out) #flag
 
-            image_pred: np.ndarray = pipe_out.image
+            image_pred: Image.Image = pipe_out.image
             field_pred: np.ndarray = pipe_out.field_pred
-            # depth_pred: np.ndarray = pipe_out.depth_np
-            # depth_colored: Image.Image = pipe_out.depth_colored
+            vis_pred: Image.Image = pipe_out.field_visualized
 
-            # Save as npy
+            # save image
             rgb_name_base = os.path.splitext(os.path.basename(rgb_path))[0]
             pred_name_base = rgb_name_base + "_pred"
-            npy_save_path = os.path.join(output_dir_npy, f"{pred_name_base}.npy")
-            if os.path.exists(npy_save_path):
-                logging.warning(f"Existing file: '{npy_save_path}' will be overwritten")
-            np.save(npy_save_path, depth_pred)
+            jpg_save_path = os.path.join(output_dir_jpg, f"{pred_name_base}.jpg")
+            if os.path.exists(jpg_save_path):
+                logging.warning(f"Existing file: '{jpg_save_path}' will be overwritten")
+            image_pred.save(jpg_save_path)
 
-            # Save as 16-bit uint png
-            depth_to_save = (depth_pred * 65535.0).astype(np.uint16)
-            png_save_path = os.path.join(output_dir_tif, f"{pred_name_base}.png")
-            if os.path.exists(png_save_path):
+            # Save field
+            
+            field_save_path = os.path.join(output_dir_field, f"{pred_name_base}.pt")
+            if os.path.exists(field_save_path):
                 logging.warning(f"Existing file: '{png_save_path}' will be overwritten")
-            Image.fromarray(depth_to_save).save(png_save_path, mode="I;16")
+            torch.save(field_save_path, field_pred)
 
-            # Colorize
-            colored_save_path = os.path.join(
-                output_dir_color, f"{pred_name_base}_colored.png"
-            )
-            if os.path.exists(colored_save_path):
-                logging.warning(
-                    f"Existing file: '{colored_save_path}' will be overwritten"
-                )
-            depth_colored.save(colored_save_path)
+            # save visualized image
+            vis_save_path = os.path.join(output_dir_field, f"{pred_name_base}.pt")
+            if os.path.exists(vis_save_path):
+                logging.warning(f"Existing file: '{png_save_path}' will be overwritten")
+            vis_pred.save(vis_save_path)

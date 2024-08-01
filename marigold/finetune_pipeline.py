@@ -35,7 +35,7 @@ from .util.image_util import (
     resize_max_res,
 )
 
-# from perspective2d.utils import draw_perspective_fields
+from perspective2d.utils import draw_perspective_fields
 
 
 
@@ -52,7 +52,7 @@ class FinetuneOutput(BaseOutput):
 
     image: Image.Image
     field: np.ndarray
-    field_visualized: Optional[np.ndarray]
+    field_visualized: Image.Image
 
 
 
@@ -128,11 +128,6 @@ class FinetunePipeline(DiffusionPipeline):
             default_processing_resolution=default_processing_resolution,
         )
 
-        # Adapt input layers
-        if 8 != self.unet.config["in_channels"]:
-            self._replace_unet_conv_in()
-        if 8 != self.unet.config["out_channels"]:
-            self._replace_unet_conv_out()
 
         self.scale_invariant = scale_invariant
         self.shift_invariant = shift_invariant
@@ -142,51 +137,6 @@ class FinetunePipeline(DiffusionPipeline):
         self.empty_text_embed = None
 
         self.latent_shape = None
-
-    def _replace_unet_conv_in(self):
-        # replace the first layer to accept 8 in_channels
-        _weight = self.unet.conv_in.weight.clone()  # [320, 4, 3, 3]
-        _bias = self.unet.conv_in.bias.clone()  # [320]
-        _weight = _weight.repeat((1, 2, 1, 1))  # Keep selected channel(s)
-        # half the activation magnitude
-        _weight *= 0.5
-        # new conv_in channel
-        _n_convin_out_channel = self.unet.conv_in.out_channels
-        _new_conv_in = Conv2d(
-            8, _n_convin_out_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
-        )
-        _new_conv_in.weight = Parameter(_weight)
-        _new_conv_in.bias = Parameter(_bias)
-        self.unet.conv_in = _new_conv_in
-        logging.info("Unet conv_in layer is replaced")
-        # replace config
-        self.unet.config["in_channels"] = 8
-        logging.info("Unet config is updated")
-        return
-    
-    def _replace_unet_conv_out(self):
-        # replace the last layer to output 8 in_channels
-        _weight = self.unet.conv_out.weight.clone()  # [4, 320, 3, 3]
-        _bias = self.unet.conv_out.bias.clone()  # [4]
-        _weight = _weight.repeat((2, 1, 1, 1))  # Keep selected channel(s)
-        _bias = _bias.repeat((2))
-        # half the activation magnitude
-        _weight *= 0.5
-        # new conv_in channel
-        _n_convout_in_channel = self.unet.conv_out.in_channels
-        _new_conv_out = Conv2d(
-             _n_convout_in_channel, 8, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
-        )
-        
-        _new_conv_out.weight = Parameter(_weight)
-        _new_conv_out.bias = Parameter(_bias)
-
-        self.unet.conv_out = _new_conv_out
-        logging.info("Unet conv_out layer is replaced")
-        # replace config
-        self.unet.config["out_channels"] = 8
-        logging.info("Unet config is updated")
-        return
 
     @torch.no_grad()
     def __call__(
@@ -325,17 +275,16 @@ class FinetunePipeline(DiffusionPipeline):
         # ----------------- Test-time ensembling -----------------
 
         # Convert to numpy
-        image_pred = image_preds.squeeze().cpu().numpy()
-        field_pred = field_preds.squeeze().cpu().numpy()
+        image_pred = image_preds.squeeze().cpu().permute(1,2,0).numpy()
+        field_pred = field_preds.squeeze().cpu().permute(1,2,0).numpy()
 
-       # Visualize; would need further work
-        #field_visualized =  draw_perspective_fields(image_pred, field_pred[:, : 2], torch.deg2rad(field_pred[:, 2]))
-
+        # Visualize; would need further work
+        field_visualized =  draw_perspective_fields(image_pred, field_pred[:,:,:2], np.deg2rad(field_pred[:,:, 2]))
 
         return FinetuneOutput (
-            image = image_pred,
-            field_pred = field_pred, 
-            field_visualized = None,
+            image = Image.fromarray((image_pred * 255).astype(np.uint8)),
+            field_pred = torch.tensor(field_pred), 
+            field_visualized = Image.fromarray(field_visualized),
         )
 
     def _check_inference_step(self, n_step: int) -> None:
@@ -435,10 +384,7 @@ class FinetunePipeline(DiffusionPipeline):
             # predict the noise residual
             noise_pred = self.unet(
                 cat_noise, t, encoder_hidden_states=batch_empty_text_embed
-            ).sample  # [B, 4, h, w]
-            # print("cat noise", cat_noise.shape)
-            # print("noise pred", noise_pred.shape)
-            # print("cat latent", cat_latent.shape)
+            ).sample  # [B, 8, h, w]
 
             # compute the previous noisy sample x_t -> x_t-1
             cat_latent = self.scheduler.step(
@@ -503,16 +449,12 @@ class FinetunePipeline(DiffusionPipeline):
         rgb_latent = rgb_latent / self.rgb_latent_scale_factor
         # decode
         z_rgb = self.vae.post_quant_conv(rgb_latent)
-        stacked_rgb = self.vae.decoder(z_rgb)
-        # mean of output channels
-        rgb_mean = stacked_rgb.mean(dim=1, keepdim=True)
+        rgb = self.vae.decoder(z_rgb)
 
         # scale latent
         field_latent = field_latent / self.field_latent_scale_factor
         # decode
         z_field = self.vae.post_quant_conv(field_latent)
-        stacked_field = self.vae.decoder(z_field)
-        # mean of output channels
-        field_mean = stacked_field.mean(dim=1, keepdim=True)
+        field = self.vae.decoder(z_field)
 
-        return (rgb_mean, field_mean)
+        return (rgb, field)

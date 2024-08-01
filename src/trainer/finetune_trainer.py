@@ -176,7 +176,7 @@ class FinetuneTrainer:
         _bias = self.model.unet.conv_in.bias.clone()  # [320]
         _weight = _weight.repeat((1, 2, 1, 1))  # Keep selected channel(s)
         # half the activation magnitude
-        _weight *= 0.5
+        #_weight *= 0.5
         # new conv_in channel
         _n_convin_out_channel = self.model.unet.conv_in.out_channels
         _new_conv_in = Conv2d(
@@ -198,7 +198,7 @@ class FinetuneTrainer:
         _weight = _weight.repeat((2, 1, 1, 1))  # Keep selected channel(s)
         _bias = _bias.repeat((2))
         # half the activation magnitude
-        _weight *= 0.5
+        #_weight *= 0.5
         # new conv_in channel
         _n_convout_in_channel = self.model.unet.conv_out.in_channels
         _new_conv_out = Conv2d(
@@ -236,6 +236,11 @@ class FinetuneTrainer:
 
             # Skip previous batches when resume
             for batch in skip_first_batches(self.train_loader, self.n_batch_in_epoch):
+
+                if (self.effective_iter == 0):
+                    self.visualize()
+
+                
                 self.model.unet.train()
 
                 # globally consistent random generators
@@ -260,8 +265,6 @@ class FinetuneTrainer:
                     cat_latents = self.model.encode_latent(rgb, field)  # [B, 8, h, w]
                     # print("cat latents shape", cat_latents.shape)
 
-                    if self.model.latent_shape is None: 
-                        self.model.latent_shape = cat_latents.shape
                 # Sample a random timestep for each image
                 timesteps = torch.randint(
                     0,
@@ -298,11 +301,10 @@ class FinetuneTrainer:
                     logging.warning("model_pred contains NaN.")
 
                 # Get the target for loss depending on the prediction type
+                # We will stick with MSE loss for now
                 target = noise
 
                 #  latent loss
-                # print("model pred", model_pred.float().shape)
-                # print("target", target.float().shape)
                 latent_loss = self.loss(model_pred.float(), target.float())
 
                 loss = latent_loss.mean()
@@ -350,7 +352,7 @@ class FinetuneTrainer:
                     self.train_metrics.reset()
 
                     # Per-step callback
-                    #self._train_step_callback()
+                    self._train_step_callback()
 
                     # End of training
                     if self.max_iter > 0 and self.effective_iter >= self.max_iter:
@@ -373,8 +375,6 @@ class FinetuneTrainer:
             self.n_batch_in_epoch = 0
 
 
-
-    @staticmethod
     def _train_step_callback(self):
         """Executed after every iteration"""
         # Save backup (with a larger interval, without training states)
@@ -384,14 +384,10 @@ class FinetuneTrainer:
             )
 
         _is_latest_saved = False
+
+
         # Validation
-        if self.val_period > 0 and 0 == self.effective_iter % self.val_period:
-            self.in_evaluation = True  # flag to do evaluation in resume run if validation is not finished
-            self.save_checkpoint(ckpt_name="latest", save_train_state=True)
-            _is_latest_saved = True
-            self.validate()
-            self.in_evaluation = False
-            self.save_checkpoint(ckpt_name="latest", save_train_state=True)
+        # We ignore it for now
 
         # Save training checkpoint (can be resumed)
         if (
@@ -402,8 +398,8 @@ class FinetuneTrainer:
             self.save_checkpoint(ckpt_name="latest", save_train_state=True)
 
         # Visualization
-        #if self.vis_period > 0 and 0 == self.effective_iter % self.vis_period:
-        #    self.visualize()
+        if self.vis_period > 0 and 0 == self.effective_iter % self.vis_period:
+            self.visualize()
 
     def validate(self):
         for i, val_loader in enumerate(self.val_loaders):
@@ -450,17 +446,15 @@ class FinetuneTrainer:
                     )
 
     def visualize(self):
-        for val_loader in self.vis_loaders:
-            vis_dataset_name = val_loader.dataset.disp_name
-            vis_out_dir = os.path.join(
-                self.out_dir_vis, self._get_backup_ckpt_name(), vis_dataset_name
-            )
-            os.makedirs(vis_out_dir, exist_ok=True)
-            _ = self.validate_single_dataset(
-                data_loader=val_loader,
-                metric_tracker=self.val_metrics,
-                save_to_dir=vis_out_dir,
-            )
+        vis_out_dir = os.path.join(
+            self.out_dir_vis, self._get_backup_ckpt_name()
+        )
+        os.makedirs(vis_out_dir, exist_ok=True)
+        _ = self.validate_single_dataset(
+            data_loader=self.train_loader,
+            metric_tracker=self.val_metrics,
+            save_to_dir=vis_out_dir,
+        )
 
     @torch.no_grad()
     def validate_single_dataset(
@@ -476,20 +470,13 @@ class FinetuneTrainer:
         val_init_seed = self.cfg.validation.init_seed
         val_seed_ls = generate_seed_sequence(val_init_seed, len(data_loader))
 
-        for i, batch in enumerate(
-            tqdm(data_loader, desc=f"evaluating on {data_loader.dataset.disp_name}"),
-            start=1,
-        ):
-            assert 1 == data_loader.batch_size
+        for i, batch in enumerate(data_loader):
+
+            if i == 10:
+                break
+            
             # Read input image
-            rgb_int = batch["rgb_int"].squeeze()  # [3, H, W]
-            # GT depth
-            depth_raw_ts = batch["depth_raw_linear"].squeeze()
-            depth_raw = depth_raw_ts.numpy()
-            depth_raw_ts = depth_raw_ts.to(self.device)
-            valid_mask_ts = batch["valid_mask_raw"].squeeze()
-            valid_mask = valid_mask_ts.numpy()
-            valid_mask_ts = valid_mask_ts.to(self.device)
+            rgb_int = batch["image"].to(self.device).to(torch.float32)[:1]
 
             # Random number generator
             seed = val_seed_ls.pop()
@@ -513,45 +500,38 @@ class FinetuneTrainer:
                 resample_method=self.cfg.validation.resample_method,
             )
 
-            depth_pred: np.ndarray = pipe_out.depth_np
+            image_pred: Image.Image = pipe_out.image
+            field_pred: np.ndarray = pipe_out.field_pred
+            vis_pred: Image.Image = pipe_out.field_visualized
 
-            if "least_square" == self.cfg.eval.alignment:
-                depth_pred, scale, shift = align_depth_least_square(
-                    gt_arr=depth_raw,
-                    pred_arr=depth_pred,
-                    valid_mask_arr=valid_mask,
-                    return_scale_shift=True,
-                    max_resolution=self.cfg.eval.align_max_res,
-                )
-            else:
-                raise RuntimeError(f"Unknown alignment type: {self.cfg.eval.alignment}")
+            if save_to_dir is not None:
+                output_dir_jpg = os.path.join(save_to_dir, "image")
+                output_dir_field = os.path.join(save_to_dir, "field")
+                output_dir_vis = os.path.join(save_to_dir, "field_visualization")
+                os.makedirs(output_dir_jpg, exist_ok=True)
+                os.makedirs(output_dir_field, exist_ok=True)
+                os.makedirs(output_dir_vis, exist_ok=True)
 
-            # Clip to dataset min max
-            depth_pred = np.clip(
-                depth_pred,
-                a_min=data_loader.dataset.min_depth,
-                a_max=data_loader.dataset.max_depth,
-            )
+                
+                 # save image
+                pred_name_base = str(i) + "_pred"
+                jpg_save_path = os.path.join(output_dir_jpg, f"{pred_name_base}.jpg")
+                if os.path.exists(jpg_save_path):
+                    logging.warning(f"Existing file: '{jpg_save_path}' will be overwritten")
+                image_pred.save(jpg_save_path)
 
-            # clip to d > 0 for evaluation
-            depth_pred = np.clip(depth_pred, a_min=1e-6, a_max=None)
+                # Save field
+                
+                field_save_path = os.path.join(output_dir_field, f"{pred_name_base}.pt")
+                if os.path.exists(field_save_path):
+                    logging.warning(f"Existing file: '{field_save_path}' will be overwritten")
+                torch.save(field_pred, field_save_path,)
 
-            # Evaluate
-            sample_metric = []
-            depth_pred_ts = torch.from_numpy(depth_pred).to(self.device)
-
-            for met_func in self.metric_funcs:
-                _metric_name = met_func.__name__
-                _metric = met_func(depth_pred_ts, depth_raw_ts, valid_mask_ts).item()
-                sample_metric.append(_metric.__str__())
-                metric_tracker.update(_metric_name, _metric)
-
-            # Save as 16-bit uint png
-            #if save_to_dir is not None:
-            #    img_name = batch["rgb_relative_path"][0].replace("/", "_")
-            #    png_save_path = os.path.join(save_to_dir, f"{img_name}.png")
-            #    depth_to_save = (pipe_out.depth_np * 65535.0).astype(np.uint16)
-            #    Image.fromarray(depth_to_save).save(png_save_path, mode="I;16")
+                # save visualized image
+                vis_save_path = os.path.join(output_dir_vis, f"{pred_name_base}.jpg")
+                if os.path.exists(vis_save_path):
+                    logging.warning(f"Existing file: '{vis_save_path}' will be overwritten")
+                vis_pred.save(vis_save_path)
 
         return metric_tracker.result()
 
