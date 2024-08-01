@@ -85,8 +85,8 @@ class FinetuneTrainer:
         # Adapt input layers
         if 8 != self.model.unet.config["in_channels"]:
             self._replace_unet_conv_in()
-        # if 8 != self.model.unet.config["out_channels"]:
-        #     self._replace_unet_conv_out()
+        if 8 != self.model.unet.config["out_channels"]:
+            self._replace_unet_conv_out()
         
 
         # Encode empty text prompt
@@ -253,7 +253,7 @@ class FinetuneTrainer:
                 field = batch["field"].to(device).to(torch.float32)
 
                 batch_size = rgb.shape[0]
-                print("batch size", batch_size)
+                # print("batch size", batch_size)
 
                 with torch.no_grad():
                     # Encode image and field
@@ -277,27 +277,21 @@ class FinetuneTrainer:
                         device=device,
                         generator=rand_num_generator,
                     )  # [B, 8, h, w]
+                # print("noise", noise.shape)
 
                 # Add noise to the latents (diffusion forward process)
                 noisy_latents = self.training_noise_scheduler.add_noise(
                     cat_latents, noise, timesteps
                 )  # [B, 8, h, w]
-                # print("noisy latents shape", noisy_latents.shape)
 
                 # Text embedding
                 text_embed = self.empty_text_embed.to(device).repeat(
                     (batch_size, 1, 1)
                 )  # [B, 77, 1024]
-                # _embed = torch.ones(2, 77, 1024).to(device)
-                # _embed[:, :2, :] = text_embed
-                # print("text embed shape", _embed.shape)
 
 
                 # Predict the noise residual
-                print("cat_latents", noisy_latents.shape)
-                print("time steps", timesteps)
-                print("text embed", text_embed.shape)
-                model_pred = self.model.unet( #flag
+                model_pred = self.model.unet(
                     noisy_latents, timesteps, text_embed
                 ).sample  # [B, 8, h, w]
                 if torch.isnan(model_pred).any():
@@ -307,6 +301,8 @@ class FinetuneTrainer:
                 target = noise
 
                 #  latent loss
+                # print("model pred", model_pred.float().shape)
+                # print("target", target.float().shape)
                 latent_loss = self.loss(model_pred.float(), target.float())
 
                 loss = latent_loss.mean()

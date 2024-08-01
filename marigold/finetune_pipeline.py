@@ -16,6 +16,8 @@ from diffusers import (
 )
 from diffusers.utils import BaseOutput
 from PIL import Image
+from torch.nn import Conv2d
+from torch.nn.parameter import Parameter
 from torch.utils.data import DataLoader, TensorDataset
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms.functional import pil_to_tensor, resize
@@ -110,6 +112,7 @@ class FinetunePipeline(DiffusionPipeline):
         default_processing_resolution: Optional[int] = None,
     ):
         super().__init__()
+
         self.register_modules(
             unet=unet,
             vae=vae,
@@ -125,6 +128,12 @@ class FinetunePipeline(DiffusionPipeline):
             default_processing_resolution=default_processing_resolution,
         )
 
+        # Adapt input layers
+        if 8 != self.unet.config["in_channels"]:
+            self._replace_unet_conv_in()
+        if 8 != self.unet.config["out_channels"]:
+            self._replace_unet_conv_out()
+
         self.scale_invariant = scale_invariant
         self.shift_invariant = shift_invariant
         self.default_denoising_steps = default_denoising_steps
@@ -134,9 +143,55 @@ class FinetunePipeline(DiffusionPipeline):
 
         self.latent_shape = None
 
+    def _replace_unet_conv_in(self):
+        # replace the first layer to accept 8 in_channels
+        _weight = self.unet.conv_in.weight.clone()  # [320, 4, 3, 3]
+        _bias = self.unet.conv_in.bias.clone()  # [320]
+        _weight = _weight.repeat((1, 2, 1, 1))  # Keep selected channel(s)
+        # half the activation magnitude
+        _weight *= 0.5
+        # new conv_in channel
+        _n_convin_out_channel = self.unet.conv_in.out_channels
+        _new_conv_in = Conv2d(
+            8, _n_convin_out_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
+        )
+        _new_conv_in.weight = Parameter(_weight)
+        _new_conv_in.bias = Parameter(_bias)
+        self.unet.conv_in = _new_conv_in
+        logging.info("Unet conv_in layer is replaced")
+        # replace config
+        self.unet.config["in_channels"] = 8
+        logging.info("Unet config is updated")
+        return
+    
+    def _replace_unet_conv_out(self):
+        # replace the last layer to output 8 in_channels
+        _weight = self.unet.conv_out.weight.clone()  # [4, 320, 3, 3]
+        _bias = self.unet.conv_out.bias.clone()  # [4]
+        _weight = _weight.repeat((2, 1, 1, 1))  # Keep selected channel(s)
+        _bias = _bias.repeat((2))
+        # half the activation magnitude
+        _weight *= 0.5
+        # new conv_in channel
+        _n_convout_in_channel = self.unet.conv_out.in_channels
+        _new_conv_out = Conv2d(
+             _n_convout_in_channel, 8, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
+        )
+        
+        _new_conv_out.weight = Parameter(_weight)
+        _new_conv_out.bias = Parameter(_bias)
+
+        self.unet.conv_out = _new_conv_out
+        logging.info("Unet conv_out layer is replaced")
+        # replace config
+        self.unet.config["out_channels"] = 8
+        logging.info("Unet config is updated")
+        return
+
     @torch.no_grad()
     def __call__(
         self,
+        input_image: Union[Image.Image, torch.Tensor],
         input_prompts: Optional[torch.Tensor] = None,
         denoising_steps: Optional[int] = None,
         ensemble_size: int = 5,
@@ -205,19 +260,56 @@ class FinetunePipeline(DiffusionPipeline):
 
         resample_method: InterpolationMode = get_tv_resample_method(resample_method)
 
+        # ----------------- Image Preprocess -----------------
+        # Convert to torch tensor
+        if isinstance(input_image, Image.Image):
+            input_image = input_image.convert("RGB")
+            # convert to torch tensor [H, W, rgb] -> [rgb, H, W]
+            rgb = pil_to_tensor(input_image)
+            rgb = rgb.unsqueeze(0)  # [1, rgb, H, W]
+            # print("rgb", rgb.shape)
+        elif isinstance(input_image, torch.Tensor):
+            rgb = input_image
+        else:
+            raise TypeError(f"Unknown input type: {type(input_image) = }")
+        noise = torch.randn(
+                rgb.shape,
+                device=rgb.device,
+                generator=generator,
+            )
+        cat_rgb = torch.cat([rgb, noise], dim=1)
+        # print("cat rgb shape", cat_rgb.shape)
+
 
         # ----------------- generating Image and field ----------------
         # generate  image and field maps (batched)
         field_ls = []
         image_ls = []
+        single_rgb_dataset = TensorDataset(cat_rgb)
+        if batch_size > 0:
+            _bs = batch_size
+        else:
+            _bs = find_batch_size(
+                ensemble_size=ensemble_size,
+                input_res=max(rgb.shape[1:]),
+                dtype=self.dtype,
+            )
+        # print("batch size", _bs)
+
+        single_rgb_loader = DataLoader(
+            single_rgb_dataset, batch_size=_bs, shuffle=False
+        )
+
         if show_progress_bar:
             iterable = tqdm(
-                range(batch), desc=" " * 2 + "Inference batches", leave=False
+                single_rgb_loader, desc=" " * 2 + "Inference batches", leave=False
             )
         else:
-            iterable = range(batch)
+            iterable = single_rgb_loader
         for batch in iterable:
-            image, field = self.single_infer( #flag,
+            (batched_img,) = batch
+            image, field = self.single_infer(
+                rgb_in=batched_img,
                 num_inference_steps=denoising_steps,
                 show_pbar=show_progress_bar,
                 generator=generator,
@@ -285,7 +377,7 @@ class FinetunePipeline(DiffusionPipeline):
     @torch.no_grad()
     def single_infer(
         self,
-        noise: torch.Tensor, 
+        rgb_in: torch.Tensor,
         num_inference_steps: int,
         generator: Union[torch.Generator, None],
         show_pbar: bool,
@@ -304,14 +396,18 @@ class FinetunePipeline(DiffusionPipeline):
             `torch.Tensor`: Predicted depth map.
         """
         device = self.device
+        rgb_in = rgb_in.to(device)
 
         # Set timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps  # [T]
 
-        # Initial depth map (noise)
-        cat_latent = torch.randn(
-            self.latent_shape,
+        # Initial map (noise)
+        _rgb_in = rgb_in[:, :3, :]
+        _field_in = rgb_in[:, 3:, :]
+        cat_latent = self.encode_latent(_rgb_in, _field_in)
+        cat_noise = torch.randn(
+            cat_latent.shape,
             device=device,
             dtype=self.dtype,
             generator=generator,
@@ -321,7 +417,7 @@ class FinetunePipeline(DiffusionPipeline):
         if self.empty_text_embed is None:
             self.encode_empty_text()
         batch_empty_text_embed = self.empty_text_embed.repeat(
-            (self.latent_shape[0], 1, 1)
+            (cat_noise.shape[0], 1, 1)
         ).to(device)  # [B, 2, 1024]
 
         # Denoising loop
@@ -338,15 +434,18 @@ class FinetunePipeline(DiffusionPipeline):
         for i, t in iterable:
             # predict the noise residual
             noise_pred = self.unet(
-                cat_latent, t, encoder_hidden_states=batch_empty_text_embed
+                cat_noise, t, encoder_hidden_states=batch_empty_text_embed
             ).sample  # [B, 4, h, w]
+            # print("cat noise", cat_noise.shape)
+            # print("noise pred", noise_pred.shape)
+            # print("cat latent", cat_latent.shape)
 
             # compute the previous noisy sample x_t -> x_t-1
             cat_latent = self.scheduler.step(
                 noise_pred, t, cat_latent, generator=generator
             ).prev_sample
 
-        image, field = self.decode_latent(cat_latent)
+        image, field = self.decode_latent(cat_latent) #flag
 
         return image, field
 
