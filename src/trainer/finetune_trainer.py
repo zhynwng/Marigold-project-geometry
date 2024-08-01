@@ -85,8 +85,8 @@ class FinetuneTrainer:
         # Adapt input layers
         if 8 != self.model.unet.config["in_channels"]:
             self._replace_unet_conv_in()
-        # if 8 != self.model.unet.config["out_channels"]:
-        #     self._replace_unet_conv_out()
+        if 8 != self.model.unet.config["out_channels"]:
+            self._replace_unet_conv_out()
         
 
         # Encode empty text prompt
@@ -193,18 +193,21 @@ class FinetuneTrainer:
     
     def _replace_unet_conv_out(self):
         # replace the last layer to output 8 in_channels
-        _weight = self.model.unet.conv_out.weight.clone()  # [320, 4, 3, 3]
-        _bias = self.model.unet.conv_out.bias.clone()  # [320]
-        _weight = _weight.repeat((1, 2, 1, 1))  # Keep selected channel(s)
+        _weight = self.model.unet.conv_out.weight.clone()  # [4, 320, 3, 3]
+        _bias = self.model.unet.conv_out.bias.clone()  # [4]
+        _weight = _weight.repeat((2, 1, 1, 1))  # Keep selected channel(s)
+        _bias = _bias.repeat((2))
         # half the activation magnitude
         _weight *= 0.5
         # new conv_in channel
-        _n_convout_out_channel = self.model.unet.conv_out.out_channels
+        _n_convout_in_channel = self.model.unet.conv_out.in_channels
         _new_conv_out = Conv2d(
-            8, _n_convout_out_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
+             _n_convout_in_channel, 8, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
         )
+        
         _new_conv_out.weight = Parameter(_weight)
         _new_conv_out.bias = Parameter(_bias)
+
         self.model.unet.conv_out = _new_conv_out
         logging.info("Unet conv_out layer is replaced")
         # replace config
@@ -250,7 +253,7 @@ class FinetuneTrainer:
                 field = batch["field"].to(device).to(torch.float32)
 
                 batch_size = rgb.shape[0]
-                print("batch size", batch_size)
+                # print("batch size", batch_size)
 
                 with torch.no_grad():
                     # Encode image and field
@@ -274,27 +277,21 @@ class FinetuneTrainer:
                         device=device,
                         generator=rand_num_generator,
                     )  # [B, 8, h, w]
+                # print("noise", noise.shape)
 
                 # Add noise to the latents (diffusion forward process)
                 noisy_latents = self.training_noise_scheduler.add_noise(
                     cat_latents, noise, timesteps
                 )  # [B, 8, h, w]
-                # print("noisy latents shape", noisy_latents.shape)
 
                 # Text embedding
                 text_embed = self.empty_text_embed.to(device).repeat(
                     (batch_size, 1, 1)
                 )  # [B, 77, 1024]
-                # _embed = torch.ones(2, 77, 1024).to(device)
-                # _embed[:, :2, :] = text_embed
-                # print("text embed shape", _embed.shape)
 
 
                 # Predict the noise residual
-                print("cat_latents", noisy_latents.shape)
-                print("time steps", timesteps)
-                print("text embed", text_embed.shape)
-                model_pred = self.model.unet( #flag
+                model_pred = self.model.unet(
                     noisy_latents, timesteps, text_embed
                 ).sample  # [B, 8, h, w]
                 if torch.isnan(model_pred).any():
@@ -304,6 +301,8 @@ class FinetuneTrainer:
                 target = noise
 
                 #  latent loss
+                # print("model pred", model_pred.float().shape)
+                # print("target", target.float().shape)
                 latent_loss = self.loss(model_pred.float(), target.float())
 
                 loss = latent_loss.mean()
@@ -351,7 +350,7 @@ class FinetuneTrainer:
                     self.train_metrics.reset()
 
                     # Per-step callback
-                    self._train_step_callback()
+                    #self._train_step_callback()
 
                     # End of training
                     if self.max_iter > 0 and self.effective_iter >= self.max_iter:
