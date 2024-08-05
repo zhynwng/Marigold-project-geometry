@@ -429,9 +429,6 @@ class FinetunePipeline(DiffusionPipeline):
         rgb_latent = mean * self.rgb_latent_scale_factor
 
         # encode field
-
-        logging.info(field_in[0, 2, :10, :10])
-
         field_latent = self.vae.encoder(field_in)
         moments = self.vae.quant_conv(field_latent)
         mean, logvar = torch.chunk(moments, 2, dim=1)
