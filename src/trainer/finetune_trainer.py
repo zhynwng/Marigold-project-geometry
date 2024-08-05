@@ -98,7 +98,13 @@ class FinetuneTrainer:
         # Trainability
         self.model.vae.requires_grad_(False)
         self.model.text_encoder.requires_grad_(False)
-        self.model.unet.requires_grad_(True)
+        self.model.unet.requires_grad_(False)
+
+        for param in model.unet.conv_in.parameters():
+            param.requires_grad = True
+        for param in model.unet.conv_out.parameters():
+            param.requires_grad = True
+        
 
         # Optimizer !should be defined after input layer is adapted
         lr = self.cfg.lr
@@ -176,7 +182,7 @@ class FinetuneTrainer:
         _bias = self.model.unet.conv_in.bias.clone()  # [320]
         _weight = _weight.repeat((1, 2, 1, 1))  # Keep selected channel(s)
         # half the activation magnitude
-        #_weight *= 0.5
+        _weight *= 0.5
         # new conv_in channel
         _n_convin_out_channel = self.model.unet.conv_in.out_channels
         _new_conv_in = Conv2d(
@@ -198,7 +204,7 @@ class FinetuneTrainer:
         _weight = _weight.repeat((2, 1, 1, 1))  # Keep selected channel(s)
         _bias = _bias.repeat((2))
         # half the activation magnitude
-        #_weight *= 0.5
+        _weight *= 0.5
         # new conv_in channel
         _n_convout_in_channel = self.model.unet.conv_out.in_channels
         _new_conv_out = Conv2d(
@@ -236,11 +242,7 @@ class FinetuneTrainer:
 
             # Skip previous batches when resume
             for batch in skip_first_batches(self.train_loader, self.n_batch_in_epoch):
-
-                if (self.effective_iter == 0):
-                    self.visualize()
-
-                
+   
                 self.model.unet.train()
 
                 # globally consistent random generators
@@ -258,8 +260,6 @@ class FinetuneTrainer:
                 field = batch["field"].to(device).to(torch.float32)
 
                 batch_size = rgb.shape[0]
-                # print("batch size", batch_size)
-
                 with torch.no_grad():
                     # Encode image and field
                     cat_latents = self.model.encode_latent(rgb, field)  # [B, 8, h, w]

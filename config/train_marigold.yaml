@@ -26,7 +26,7 @@ augmentation:
 dataloader:
   num_workers: 2
   effective_batch_size: 32
-  max_train_batch_size: 2
+  max_train_batch_size: 32
   seed: 2024  # to ensure continuity when resuming from checkpoint
 
 # Training settings
@@ -38,7 +38,7 @@ trainer:
   save_period: 50
   backup_period: 2000
   validation_period: 2000
-  visualization_period: 30
+  visualization_period: 1
 
 multi_res_noise:
   strength: 0.9
@@ -49,7 +49,7 @@ gt_depth_type: depth_raw_norm
 gt_mask_type: valid_mask_raw
 
 max_epoch: 10000  # a large enough number
-max_iter: 30000  # usually converges at around 20k
+max_iter: 20000  # usually converges at around 20k
 
 optimizer:
   name: Adam

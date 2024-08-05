@@ -192,8 +192,8 @@ class BaseDepthDataset(Dataset):
         return image
 
     def transform_maps(self, latitude_map, gravity_maps):
-        latitude_map = torch.deg2rad(latitude_map)
-        joined_maps = torch.cat([latitude_map.unsqueeze(0), gravity_maps], dim = 0)
+        latitude_map = latitude_map / 90
+        joined_maps = torch.cat([gravity_maps, latitude_map.unsqueeze(0),], dim = 0)
 
         return joined_maps
 

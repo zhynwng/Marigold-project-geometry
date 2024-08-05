@@ -276,13 +276,17 @@ class FinetunePipeline(DiffusionPipeline):
 
         # Convert to numpy
         image_pred = image_preds.squeeze().cpu().permute(1,2,0).numpy()
-        field_pred = field_preds.squeeze().cpu().permute(1,2,0).numpy()
+        field_pred = image_preds.squeeze().cpu().permute(1,2,0).numpy()
+
+        # normalize image and field
+        image_pred = (image_pred + 1) * 255 / 2
+        field_pred[:, :, 2] *= 90
 
         # Visualize; would need further work
-        field_visualized =  draw_perspective_fields(image_pred, field_pred[:,:,:2], np.deg2rad(field_pred[:,:, 2]))
+        field_visualized =  draw_perspective_fields(image_pred, field_pred[:, :, :2], np.deg2rad(field_pred[:, :, 2]))
 
         return FinetuneOutput (
-            image = Image.fromarray((image_pred * 255).astype(np.uint8)),
+            image = Image.fromarray((image_pred).astype(np.uint8)),
             field_pred = torch.tensor(field_pred), 
             field_visualized = Image.fromarray(field_visualized),
         )
@@ -354,6 +358,7 @@ class FinetunePipeline(DiffusionPipeline):
         # Initial map (noise)
         _rgb_in = rgb_in[:, :3, :]
         _field_in = rgb_in[:, 3:, :]
+        logging.info(_field_in.shape)
         cat_latent = self.encode_latent(_rgb_in, _field_in)
         cat_noise = torch.randn(
             cat_latent.shape,
@@ -409,23 +414,30 @@ class FinetunePipeline(DiffusionPipeline):
         Returns:
             `torch.Tensor`: Image and field latent.
         """
+
+        # normalize rgb
+        rgb_norm: torch.Tensor = rgb_in / 255.0 * 2.0 - 1.0  #  [0, 255] -> [-1, 1]
+        rgb_norm = rgb_norm.to(self.dtype)
+        assert rgb_norm.min() >= -1.0 and rgb_norm.max() <= 1.0
+
+
         # encode rgb
-        rgb_latent = self.vae.encoder(rgb_in)
+        rgb_latent = self.vae.encoder(rgb_norm)
         moments = self.vae.quant_conv(rgb_latent)
         mean, logvar = torch.chunk(moments, 2, dim=1)
         # scale rgb latent
         rgb_latent = mean * self.rgb_latent_scale_factor
 
         # encode field
+
+        logging.info(field_in[0, 2, :10, :10])
+
         field_latent = self.vae.encoder(field_in)
         moments = self.vae.quant_conv(field_latent)
         mean, logvar = torch.chunk(moments, 2, dim=1)
-        # scale rgb latent
-        field_latent = mean * self.field_latent_scale_factor
+        field_latent = mean 
 
         # concat the latents
-        # print("rgb latent shape", rgb_latent.shape)
-        # print("field latent shape", field_latent.shape)
         cat_latent = torch.cat([rgb_latent, field_latent], dim=1)
 
         return cat_latent
@@ -451,8 +463,6 @@ class FinetunePipeline(DiffusionPipeline):
         z_rgb = self.vae.post_quant_conv(rgb_latent)
         rgb = self.vae.decoder(z_rgb)
 
-        # scale latent
-        field_latent = field_latent / self.field_latent_scale_factor
         # decode
         z_field = self.vae.post_quant_conv(field_latent)
         field = self.vae.decoder(z_field)

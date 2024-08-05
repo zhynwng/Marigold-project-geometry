@@ -2,6 +2,6 @@ dataset:
   train:
     name: kandinsky_indoor_field
     disp_name: field_train
-    dir: /home-nfs/zhiyanw/mini
-    filenames: /home-nfs/zhiyanw/mini_list.txt
+    dir: /share/data/p2p/zhiyanw/Indoor
+    filenames: /share/data/p2p/zhiyanw/indoor_list.txt
     has_filled_depth: False
