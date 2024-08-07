@@ -52,6 +52,8 @@ from src.util.multi_res_noise import multi_res_noise_like
 from src.util.alignment import align_depth_least_square
 from src.util.seeding import generate_seed_sequence
 
+from perspective2d.utils import draw_perspective_fields
+
 
 class FinetuneTrainer:
     def __init__(
@@ -98,7 +100,7 @@ class FinetuneTrainer:
         # Trainability
         self.model.vae.requires_grad_(False)
         self.model.text_encoder.requires_grad_(False)
-        self.model.unet.requires_grad_(False)
+        self.model.unet.requires_grad_(True)
 
         for param in model.unet.conv_in.parameters():
             param.requires_grad = True
@@ -258,6 +260,7 @@ class FinetuneTrainer:
                 # Get data
                 rgb = batch["image"].to(device).to(torch.float32)
                 field = batch["field"].to(device).to(torch.float32)
+
 
                 batch_size = rgb.shape[0]
                 with torch.no_grad():
@@ -501,7 +504,7 @@ class FinetuneTrainer:
             )
 
             image_pred: Image.Image = pipe_out.image
-            field_pred: np.ndarray = pipe_out.field_pred
+            field_pred: np.ndarray = pipe_out.field
             vis_pred: Image.Image = pipe_out.field_visualized
 
             if save_to_dir is not None:

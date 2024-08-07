@@ -276,7 +276,7 @@ class FinetunePipeline(DiffusionPipeline):
 
         # Convert to numpy
         image_pred = image_preds.squeeze().cpu().permute(1,2,0).numpy()
-        field_pred = image_preds.squeeze().cpu().permute(1,2,0).numpy()
+        field_pred = field_preds.squeeze().cpu().permute(1,2,0).numpy()
 
         # normalize image and field
         image_pred = (image_pred + 1) * 255 / 2
@@ -287,7 +287,7 @@ class FinetunePipeline(DiffusionPipeline):
 
         return FinetuneOutput (
             image = Image.fromarray((image_pred).astype(np.uint8)),
-            field_pred = torch.tensor(field_pred), 
+            field = torch.tensor(field_pred), 
             field_visualized = Image.fromarray(field_visualized),
         )
 
@@ -358,7 +358,6 @@ class FinetunePipeline(DiffusionPipeline):
         # Initial map (noise)
         _rgb_in = rgb_in[:, :3, :]
         _field_in = rgb_in[:, 3:, :]
-        logging.info(_field_in.shape)
         cat_latent = self.encode_latent(_rgb_in, _field_in)
         cat_noise = torch.randn(
             cat_latent.shape,
@@ -465,3 +464,91 @@ class FinetunePipeline(DiffusionPipeline):
         field = self.vae.decoder(z_field)
 
         return (rgb, field)
+
+
+    # Test whether we can decode a field latent
+    def test_field_latent(self, rgb_in: torch.Tensor, field_in: torch.Tensor):
+        # encode rgb
+
+        # normalize rgb
+        rgb_norm: torch.Tensor = rgb_in / 255.0 * 2.0 - 1.0  #  [0, 255] -> [-1, 1]
+        rgb_norm = rgb_norm.to(self.dtype)
+        assert rgb_norm.min() >= -1.0 and rgb_norm.max() <= 1.0
+
+        rgb_latent = self.vae.encoder(rgb_norm)
+        moments = self.vae.quant_conv(rgb_latent)
+        mean, logvar = torch.chunk(moments, 2, dim=1)
+        # scale rgb latent
+        rgb_latent = mean * self.rgb_latent_scale_factor
+
+        # encode field
+        field_latent = self.vae.encoder(field_in)
+        moments = self.vae.quant_conv(field_latent)
+        mean, logvar = torch.chunk(moments, 2, dim=1)
+        field_latent = mean 
+
+
+        # now, we decode then, to see if the decoder can recover the latents
+        rgb_latent = rgb_latent / self.rgb_latent_scale_factor
+        # decode
+        z_rgb = self.vae.post_quant_conv(rgb_latent)
+        rgb = self.vae.decoder(z_rgb)
+
+        # decode
+        z_field = self.vae.post_quant_conv(field_latent)
+        field = self.vae.decoder(z_field)
+
+        
+        image_pred = rgb.squeeze().cpu().permute(1,2,0).numpy()
+        field_pred = field.squeeze().cpu().permute(1,2,0).numpy()
+
+        # normalize image and field
+        image_pred = (image_pred + 1) * 255 / 2
+        field_pred[:, :, 2] *= 90
+
+        # Visualize; would need further work
+        field_visualized =  draw_perspective_fields(image_pred, field_pred[:, :, :2], np.deg2rad(field_pred[:, :, 2]))
+
+        '''
+
+                # Test decoder output
+                image_pred, vis_pred = self.model.test_field_latent(rgb[:1], field[:1])
+                save_to_dir = os.path.join(
+                self.out_dir_vis, self._get_backup_ckpt_name()
+                )
+
+                output_dir_jpg = os.path.join(save_to_dir, "image_test")
+                output_dir_vis = os.path.join(save_to_dir, "field_visualization_test")
+                os.makedirs(output_dir_jpg, exist_ok=True)
+                os.makedirs(output_dir_vis, exist_ok=True)
+
+                
+                 # save image
+                pred_name_base = "1_pred"
+                jpg_save_path = os.path.join(output_dir_jpg, f"{pred_name_base}.jpg")
+                if os.path.exists(jpg_save_path):
+                    logging.warning(f"Existing file: '{jpg_save_path}' will be overwritten")
+                image_pred.save(jpg_save_path)
+
+                img_save_path = os.path.join(output_dir_jpg, f"{pred_name_base}_og.jpg")
+                image = rgb[:1].squeeze().cpu().permute(1,2,0).numpy().astype(np.uint8)
+                
+
+                # save visualized image
+                vis_save_path = os.path.join(output_dir_vis, f"{pred_name_base}.jpg")
+                if os.path.exists(vis_save_path):
+                    logging.warning(f"Existing file: '{vis_save_path}' will be overwritten")
+                vis_pred.save(vis_save_path)
+
+                field = field[:1].squeeze().cpu().permute(1,2,0).numpy()
+
+                field_visualized =  draw_perspective_fields(image, field[:, :, :2], np.deg2rad(field[:, :, 2] * 90))
+                field_visualized = Image.fromarray(field_visualized)
+                field_save_path_2 = os.path.join(output_dir_vis, f"{pred_name_base}_og.jpg")
+                image = Image.fromarray(image)
+                image.save(img_save_path)
+                field_visualized.save(field_save_path_2)
+
+            '''
+
+        return (Image.fromarray(image_pred.astype(np.uint8)), Image.fromarray(field_visualized))

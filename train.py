@@ -33,6 +33,8 @@ from torch.utils.data import ConcatDataset, DataLoader
 from tqdm import tqdm
 
 from marigold.finetune_pipeline import FinetunePipeline
+from marigold.marigokd_pipeline import MarigoldPipeline
+
 from src.dataset import BaseDepthDataset, DatasetMode, get_dataset
 from src.dataset.mixed_sampler import MixedBatchSampler
 from src.trainer import get_trainer_cls
@@ -324,7 +326,7 @@ if "__main__" == __name__:
 
     # -------------------- Model --------------------
     _pipeline_kwargs = cfg.pipeline.kwargs if cfg.pipeline.kwargs is not None else {}
-    model = FinetunePipeline.from_pretrained(
+    model = MarigoldPipeline.from_pretrained(
         os.path.join(base_ckpt_dir, cfg.model.pretrained_path), **_pipeline_kwargs
     )
 

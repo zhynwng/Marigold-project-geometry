@@ -31,14 +31,14 @@ dataloader:
 
 # Training settings
 trainer:
-  name: FinetuneTrainer
+  name: MarigoldTrainer
   training_noise_scheduler:
     pretrained_path: stable-diffusion-2
   init_seed: 2024  # use null to train w/o seeding
   save_period: 50
   backup_period: 2000
   validation_period: 2000
-  visualization_period: 1
+  visualization_period: 50
 
 multi_res_noise:
   strength: 0.9

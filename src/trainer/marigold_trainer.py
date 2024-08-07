@@ -27,7 +27,6 @@ import os
 import shutil
 from datetime import datetime
 from typing import List, Union
-import sys
 
 import numpy as np
 import torch
@@ -40,7 +39,6 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from PIL import Image
-import matplotlib.pyplot as plt
 
 from marigold.marigold_pipeline import MarigoldPipeline, MarigoldDepthOutput
 from src.util import metric
@@ -225,28 +223,21 @@ class MarigoldTrainer:
                 # Get data
                 rgb = batch["image"].to(device).to(torch.float32)
                 field = batch["field"].to(device).to(torch.float32)
-                input = torch.cat((rgb, field), dim=-1)
+
+                # normalize rgb 
+                rgb_norm: torch.Tensor = rgb / 255.0 * 2.0 - 1.0  #  [0, 255] -> [-1, 1]
+                rgb_norm = rgb_norm.to(self.dtype)
+                assert rgb_norm.min() >= -1.0 and rgb_norm.max() <= 1.0
+
 
                 batch_size = rgb.shape[0]
-
                 with torch.no_grad():
-                    # Encode input
-                    input_latent = self.model.encode_rgb(input)  # [B, 4, h, w]
-
-                # print(field.shape)
-                # Convert the tensor to a NumPy array and transpose to (H, W, C)
-                # array = tensor.permute(1, 2, 0).numpy()
-
-                # # Plot the tensor as an image
-                # img_field = field[0].squeeze(0)
-                # plt.imshow(img_field.cpu().numpy().transpose(1, 2, 0))
-                # plt.title('Kandinsky Field Image')
-                # plt.axis('off')  # Hide axes
-
-                # # Save the image to output.png
-                # plt.savefig('output.png', bbox_inches='tight', pad_inches=0)
-                # plt.close()  # Close the plot to free up memory
-                # sys.exit(0)
+                    # Encode image
+                    rgb_latent = self.model.encode_rgb(rgb_norm)  # [B, 4, h, w]
+                    # Encode field depth
+                    field_latent = self.encode_field(
+                        field
+                    )  # [B, 4, h, w]
 
                 # Sample a random timestep for each image
                 timesteps = torch.randint(
@@ -264,7 +255,7 @@ class MarigoldTrainer:
                         # calculate strength depending on t
                         strength = strength * (timesteps / self.scheduler_timesteps)
                     noise = multi_res_noise_like(
-                        gt_depth_latent,
+                        rgb_latent,
                         strength=strength,
                         downscale_strategy=self.mr_noise_downscale_strategy,
                         generator=rand_num_generator,
@@ -272,14 +263,14 @@ class MarigoldTrainer:
                     )
                 else:
                     noise = torch.randn(
-                        gt_depth_latent.shape,
+                        rgb_latent.shape,
                         device=device,
                         generator=rand_num_generator,
                     )  # [B, 4, h, w]
 
                 # Add noise to the latents (diffusion forward process)
                 noisy_latents = self.training_noise_scheduler.add_noise(
-                    gt_depth_latent, noise, timesteps
+                    rgb_latent, noise, timesteps
                 )  # [B, 4, h, w]
 
                 # Text embedding
@@ -287,10 +278,9 @@ class MarigoldTrainer:
                     (batch_size, 1, 1)
                 )  # [B, 77, 1024]
 
-
-                # Concat rgb and depth latents
+                # Concat field and rgb latents
                 cat_latents = torch.cat(
-                    [rgb_latent, noisy_latents], dim=1
+                    [field_latent, noisy_latents], dim=1
                 )  # [B, 8, h, w]
                 cat_latents = cat_latents.float()
 
@@ -301,25 +291,19 @@ class MarigoldTrainer:
                 if torch.isnan(model_pred).any():
                     logging.warning("model_pred contains NaN.")
 
-                # Get the target for loss depending on the prediction type #flag
+                # Get the target for loss depending on the prediction type
                 if "sample" == self.prediction_type:
-                    target = gt_depth_latent
+                    target = rgb_latent
                 elif "epsilon" == self.prediction_type:
                     target = noise
                 elif "v_prediction" == self.prediction_type:
                     target = self.training_noise_scheduler.get_velocity(
-                        gt_depth_latent, noise, timesteps
+                        rgb_latent, noise, timesteps
                     )  # [B, 4, h, w]
                 else:
                     raise ValueError(f"Unknown prediction type {self.prediction_type}")
 
-                # Masked latent loss
-                #if self.gt_mask_type is not None:
-                #    latent_loss = self.loss(
-                #        model_pred[valid_mask_down].float(),
-                #        target[valid_mask_down].float(),
-                #    )
-                #else:
+               
                 latent_loss = self.loss(model_pred.float(), target.float())
 
                 loss = latent_loss.mean()
@@ -389,12 +373,6 @@ class MarigoldTrainer:
             # Epoch end
             self.n_batch_in_epoch = 0
 
-    def encode_depth(self, depth_in):
-        # stack depth into 3-channel
-        stacked = self.stack_depth_images(depth_in)
-        # encode using VAE encoder
-        depth_latent = self.model.encode_rgb(stacked)
-        return depth_latent
 
     @staticmethod
     def stack_depth_images(depth_in):
@@ -419,7 +397,7 @@ class MarigoldTrainer:
             self.in_evaluation = True  # flag to do evaluation in resume run if validation is not finished
             self.save_checkpoint(ckpt_name="latest", save_train_state=True)
             _is_latest_saved = True
-            self.validate()
+            #self.validate()
             self.in_evaluation = False
             self.save_checkpoint(ckpt_name="latest", save_train_state=True)
 
@@ -432,9 +410,10 @@ class MarigoldTrainer:
             self.save_checkpoint(ckpt_name="latest", save_train_state=True)
 
         # Visualization
-        #if self.vis_period > 0 and 0 == self.effective_iter % self.vis_period:
-        #    self.visualize()
+        if self.vis_period > 0 and 0 == self.effective_iter % self.vis_period:
+            self.visualize()
 
+    '''
     def validate(self):
         for i, val_loader in enumerate(self.val_loaders):
             val_dataset_name = val_loader.dataset.disp_name
@@ -479,16 +458,19 @@ class MarigoldTrainer:
                         ckpt_name=self._get_backup_ckpt_name(), save_train_state=False
                     )
 
+    '''
+
     def visualize(self):
         vis_out_dir = os.path.join(
             self.out_dir_vis, self._get_backup_ckpt_name()
         )
         os.makedirs(vis_out_dir, exist_ok=True)
         _ = self.validate_single_dataset(
-            data_loader=self.data_loader,
+            data_loader=self.train_loader,
             metric_tracker=self.val_metrics,
             save_to_dir=vis_out_dir,
         )
+
 
     @torch.no_grad()
     def validate_single_dataset(
@@ -504,13 +486,15 @@ class MarigoldTrainer:
         val_init_seed = self.cfg.validation.init_seed
         val_seed_ls = generate_seed_sequence(val_init_seed, len(data_loader))
 
-        for i, batch in enumerate(
-            tqdm(data_loader[:100], desc=f"evaluating on {data_loader.dataset.disp_name}"),
-            start=1,
-        ):
+        for i, batch in enumerate(data_loader):
+
+            if i == 10:
+                break
+            
             assert 1 == data_loader.batch_size
-            # Read input image
-            rgb_int = batch["image"].to(device).to(torch.float32)
+            # Read input field
+            field_int = batch["field"].to(self.device).to(torch.float32)[:1]
+            # [1, 3, H, W]
 
             # Random number generator
             seed = val_seed_ls.pop()
@@ -521,8 +505,8 @@ class MarigoldTrainer:
                 generator.manual_seed(seed)
 
             # Predict depth
-            pipe_out: FinetuneOutput = self.model(
-                rgb_int,
+            pipe_out: MarigoldOutput = self.model(
+                field_int,
                 denoising_steps=self.cfg.validation.denoising_steps,
                 ensemble_size=self.cfg.validation.ensemble_size,
                 processing_res=self.cfg.validation.processing_res,
@@ -535,16 +519,20 @@ class MarigoldTrainer:
             )
 
             image_pred: Image.Image = pipe_out.image
-            field_pred: np.ndarray = pipe_out.field_pred
+            field_pred: np.ndarray = pipe_out.field
             vis_pred: Image.Image = pipe_out.field_visualized
 
             if save_to_dir is not None:
                 output_dir_jpg = os.path.join(save_to_dir, "image")
                 output_dir_field = os.path.join(save_to_dir, "field")
-                output_dir_vis = os.path.join(save_to_dir, "depth_npy")
+                output_dir_vis = os.path.join(save_to_dir, "field_visualization")
+                os.makedirs(output_dir_jpg, exist_ok=True)
+                os.makedirs(output_dir_field, exist_ok=True)
+                os.makedirs(output_dir_vis, exist_ok=True)
 
+                
                  # save image
-                pred_name_base = i + "_pred"
+                pred_name_base = str(i) + "_pred"
                 jpg_save_path = os.path.join(output_dir_jpg, f"{pred_name_base}.jpg")
                 if os.path.exists(jpg_save_path):
                     logging.warning(f"Existing file: '{jpg_save_path}' will be overwritten")
@@ -554,16 +542,17 @@ class MarigoldTrainer:
                 
                 field_save_path = os.path.join(output_dir_field, f"{pred_name_base}.pt")
                 if os.path.exists(field_save_path):
-                    logging.warning(f"Existing file: '{png_save_path}' will be overwritten")
-                torch.save(field_save_path, field_pred)
+                    logging.warning(f"Existing file: '{field_save_path}' will be overwritten")
+                torch.save(field_pred, field_save_path,)
 
                 # save visualized image
-                vis_save_path = os.path.join(output_dir_field, f"{pred_name_base}.jpg")
+                vis_save_path = os.path.join(output_dir_vis, f"{pred_name_base}.jpg")
                 if os.path.exists(vis_save_path):
-                    logging.warning(f"Existing file: '{png_save_path}' will be overwritten")
+                    logging.warning(f"Existing file: '{vis_save_path}' will be overwritten")
                 vis_pred.save(vis_save_path)
 
         return metric_tracker.result()
+        
 
     def _get_next_seed(self):
         if 0 == len(self.global_seed_sequence):
