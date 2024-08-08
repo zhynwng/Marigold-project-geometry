@@ -33,7 +33,7 @@ from torch.utils.data import ConcatDataset, DataLoader
 from tqdm import tqdm
 
 from marigold.finetune_pipeline import FinetunePipeline
-from marigold.marigokd_pipeline import MarigoldPipeline
+from marigold.marigold_pipeline import MarigoldPipeline
 
 from src.dataset import BaseDepthDataset, DatasetMode, get_dataset
 from src.dataset.mixed_sampler import MixedBatchSampler

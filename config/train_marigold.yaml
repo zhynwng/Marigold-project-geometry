@@ -8,7 +8,7 @@ base_config:
 
 
 pipeline:
-  name: FinetunePipeline
+  name: MarigoldPipeline
   kwargs:
     scale_invariant: true
     shift_invariant: true
@@ -38,7 +38,7 @@ trainer:
   save_period: 50
   backup_period: 2000
   validation_period: 2000
-  visualization_period: 50
+  visualization_period: 10
 
 multi_res_noise:
   strength: 0.9
