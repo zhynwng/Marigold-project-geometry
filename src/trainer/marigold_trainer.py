@@ -40,7 +40,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from PIL import Image
 
-from marigold.marigold_pipeline import MarigoldPipeline, MarigoldDepthOutput
+from marigold.marigold_pipeline import MarigoldPipeline, MarigoldOutput
 from src.util import metric
 from src.util.data_loader import skip_first_batches
 from src.util.logging_util import tb_logger, eval_dic_to_text
@@ -226,7 +226,7 @@ class MarigoldTrainer:
 
                 # normalize rgb 
                 rgb_norm: torch.Tensor = rgb / 255.0 * 2.0 - 1.0  #  [0, 255] -> [-1, 1]
-                rgb_norm = rgb_norm.to(self.dtype)
+                rgb_norm = rgb_norm.float()
                 assert rgb_norm.min() >= -1.0 and rgb_norm.max() <= 1.0
 
 
@@ -235,9 +235,7 @@ class MarigoldTrainer:
                     # Encode image
                     rgb_latent = self.model.encode_rgb(rgb_norm)  # [B, 4, h, w]
                     # Encode field depth
-                    field_latent = self.encode_field(
-                        field
-                    )  # [B, 4, h, w]
+                    field_latent = self.model.encode_field(field)  # [B, 4, h, w]
 
                 # Sample a random timestep for each image
                 timesteps = torch.randint(
@@ -255,7 +253,7 @@ class MarigoldTrainer:
                         # calculate strength depending on t
                         strength = strength * (timesteps / self.scheduler_timesteps)
                     noise = multi_res_noise_like(
-                        rgb_latent,
+                        field_latent,
                         strength=strength,
                         downscale_strategy=self.mr_noise_downscale_strategy,
                         generator=rand_num_generator,
@@ -263,14 +261,14 @@ class MarigoldTrainer:
                     )
                 else:
                     noise = torch.randn(
-                        rgb_latent.shape,
+                        field_latent.shape,
                         device=device,
                         generator=rand_num_generator,
                     )  # [B, 4, h, w]
 
                 # Add noise to the latents (diffusion forward process)
                 noisy_latents = self.training_noise_scheduler.add_noise(
-                    rgb_latent, noise, timesteps
+                    field_latent, noise, timesteps
                 )  # [B, 4, h, w]
 
                 # Text embedding
@@ -280,7 +278,7 @@ class MarigoldTrainer:
 
                 # Concat field and rgb latents
                 cat_latents = torch.cat(
-                    [field_latent, noisy_latents], dim=1
+                    [rgb_latent, noisy_latents], dim=1
                 )  # [B, 8, h, w]
                 cat_latents = cat_latents.float()
 
@@ -491,9 +489,10 @@ class MarigoldTrainer:
             if i == 10:
                 break
             
-            assert 1 == data_loader.batch_size
+            # assert 1 == data_loader.batch_size
             # Read input field
-            field_int = batch["field"].to(self.device).to(torch.float32)[:1]
+            # print(batch)
+            rgb_int = batch["image"].to(self.device).to(torch.float32)[:1]
             # [1, 3, H, W]
 
             # Random number generator
@@ -506,7 +505,7 @@ class MarigoldTrainer:
 
             # Predict depth
             pipe_out: MarigoldOutput = self.model(
-                field_int,
+                rgb_int,
                 denoising_steps=self.cfg.validation.denoising_steps,
                 ensemble_size=self.cfg.validation.ensemble_size,
                 processing_res=self.cfg.validation.processing_res,
