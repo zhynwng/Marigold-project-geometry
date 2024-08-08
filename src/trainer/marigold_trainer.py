@@ -459,15 +459,18 @@ class MarigoldTrainer:
     '''
 
     def visualize(self):
-        vis_out_dir = os.path.join(
-            self.out_dir_vis, self._get_backup_ckpt_name()
-        )
-        os.makedirs(vis_out_dir, exist_ok=True)
-        _ = self.validate_single_dataset(
-            data_loader=self.train_loader,
-            metric_tracker=self.val_metrics,
-            save_to_dir=vis_out_dir,
-        )
+        for val_loader in self.vis_loaders:
+            vis_dataset_name = val_loader.dataset.disp_name
+            vis_out_dir = os.path.join(
+                self.out_dir_vis, self._get_backup_ckpt_name(), vis_dataset_name
+            )
+            os.makedirs(vis_out_dir, exist_ok=True)
+            _ = self.validate_single_dataset(
+                data_loader=val_loader,
+                metric_tracker=self.val_metrics,
+                save_to_dir=vis_out_dir,
+            )
+
 
 
     @torch.no_grad()
@@ -484,15 +487,18 @@ class MarigoldTrainer:
         val_init_seed = self.cfg.validation.init_seed
         val_seed_ls = generate_seed_sequence(val_init_seed, len(data_loader))
 
-        for i, batch in enumerate(data_loader):
+        for i, batch in enumerate(
+            tqdm(data_loader, desc=f"evaluating on {data_loader.dataset.disp_name}"),
+            start=1,
+        ):
 
             if i == 10:
                 break
             
-            # assert 1 == data_loader.batch_size
+            assert 1 == data_loader.batch_size
             # Read input field
             # print(batch)
-            rgb_int = batch["image"].to(self.device).to(torch.float32)[:1]
+            rgb_int = batch["image"].to(self.device).to(torch.float32)
             # [1, 3, H, W]
 
             # Random number generator

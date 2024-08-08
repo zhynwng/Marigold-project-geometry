@@ -1,9 +1,7 @@
 dataset:
   vis:
-  - name: hypersim
-    disp_name: hypersim_vis
-    dir: hypersim/hypersim_processed_val.tar
-    filenames: data_split/hypersim/selected_vis_sample.txt
-    resize_to_hw:
-    - 480
-    - 640
+  - name: kandinsky_indoor_field
+    disp_name: mini
+    dir: /share/data/p2p/yz5880/mini
+    filenames: /share/data/p2p/yz5880/mini_list.txt
+    has_filled_depth: False

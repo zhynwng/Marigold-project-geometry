@@ -43,3 +43,4 @@ dataset:
     filenames: data_split/kitti/eigen_val_from_train_sub_100.txt
     kitti_bm_crop: true
     valid_mask_crop: eigen
+
