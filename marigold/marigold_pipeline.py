@@ -248,6 +248,7 @@ class MarigoldPipeline(DiffusionPipeline):
 
         # Normalize rgb values
         rgb_norm: torch.Tensor = input_rgb / 255.0 * 2.0 - 1.0  #  [0, 255] -> [-1, 1]
+        # rgb_norm: torch.Tensor = 2 * ((input_rgb - input_rgb.min()) / (input_rgb.max() - input_rgb.min())) - 1 # normalize field
         rgb_norm = rgb_norm.to(self.dtype)
         assert rgb_norm.min() >= -1.0 and rgb_norm.max() <= 1.0
 
@@ -329,10 +330,10 @@ class MarigoldPipeline(DiffusionPipeline):
         field_pred[:, :, 2] *= 90
 
         # Visualize; would need further work
-        field_visualized =  draw_perspective_fields(rgb, field_pred[:, :, :2], np.deg2rad(field_pred[:, :, 2] * 90))
+        field_visualized =  draw_perspective_fields(input_rgb.numpy(), field_pred[:, :, :2], np.deg2rad(field_pred[:, :, 2] * 90))
 
         return MarigoldOutput (
-            image = Image.fromarray((rgb).astype(np.uint8)),
+            image = Image.fromarray((input_rgb).astype(np.uint8)),
             field = torch.tensor(field_pred), 
             field_visualized = Image.fromarray(field_visualized),
         )
@@ -427,7 +428,7 @@ class MarigoldPipeline(DiffusionPipeline):
         # Encode image
         rgb_latent = self.encode_rgb(rgb_in) # [B, 4, h, w]
 
-        latent_visualized = self.plot_latent(rgb_latent, "image")
+        latent_visualized = self.plot_latent(rgb_latent, "image") # replace name to "field" if plotting field latent
 
         # Initial depth map (noise)
         field_latent = torch.randn(
@@ -469,8 +470,6 @@ class MarigoldPipeline(DiffusionPipeline):
             field_latent = self.scheduler.step(
                 noise_pred, t, field_latent, generator=generator
             ).prev_sample
-
-        latent_visualized = self.plot_latent(field_latent, "field")
 
         field = self.decode_field(field_latent)
 
@@ -516,8 +515,6 @@ class MarigoldPipeline(DiffusionPipeline):
         Returns:
             `torch.Tensor`: Image latent.
         """
-
-    
         # encode
         h = self.vae.encoder(rgb_in)
         moments = self.vae.quant_conv(h)
@@ -547,6 +544,8 @@ class MarigoldPipeline(DiffusionPipeline):
         Returns:
             `torch.Tensor`: Decoded depth map.
         """
+        # scale latent
+        field_latent = field_latent / self.rgb_latent_scale_factor
         # decode
         z = self.vae.post_quant_conv(field_latent)
         field = self.vae.decoder(z)
