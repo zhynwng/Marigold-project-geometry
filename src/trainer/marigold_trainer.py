@@ -253,7 +253,7 @@ class MarigoldTrainer:
                         # calculate strength depending on t
                         strength = strength * (timesteps / self.scheduler_timesteps)
                     noise = multi_res_noise_like(
-                        field_latent,
+                        rgb_latent,
                         strength=strength,
                         downscale_strategy=self.mr_noise_downscale_strategy,
                         generator=rand_num_generator,
@@ -261,14 +261,14 @@ class MarigoldTrainer:
                     )
                 else:
                     noise = torch.randn(
-                        field_latent.shape,
+                        rgb_latent.shape,
                         device=device,
                         generator=rand_num_generator,
                     )  # [B, 4, h, w]
 
                 # Add noise to the latents (diffusion forward process)
                 noisy_latents = self.training_noise_scheduler.add_noise(
-                    field_latent, noise, timesteps
+                    rgb_latent, noise, timesteps
                 )  # [B, 4, h, w]
 
                 # Text embedding
@@ -278,7 +278,7 @@ class MarigoldTrainer:
 
                 # Concat field and rgb latents
                 cat_latents = torch.cat(
-                    [rgb_latent, noisy_latents], dim=1
+                    [field_latent, noisy_latents], dim=1
                 )  # [B, 8, h, w]
                 cat_latents = cat_latents.float()
 
@@ -498,7 +498,7 @@ class MarigoldTrainer:
             assert 1 == data_loader.batch_size
             # Read input field
             # print(batch)
-            rgb_int = batch["image"].to(self.device).to(torch.float32)
+            field_in = batch["field"].to(self.device).to(torch.float32)
             # [1, 3, H, W]
 
             # Random number generator
@@ -511,7 +511,7 @@ class MarigoldTrainer:
 
             # Predict depth
             pipe_out: MarigoldOutput = self.model(
-                rgb_int,
+                field_in,
                 denoising_steps=self.cfg.validation.denoising_steps,
                 ensemble_size=self.cfg.validation.ensemble_size,
                 processing_res=self.cfg.validation.processing_res,

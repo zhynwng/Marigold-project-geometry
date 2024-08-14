@@ -148,7 +148,7 @@ class MarigoldPipeline(DiffusionPipeline):
     @torch.no_grad()
     def __call__(
         self,
-        input_rgb: torch.Tensor ,
+        input_field: torch.Tensor ,
         denoising_steps: Optional[int] = None,
         ensemble_size: int = 5,
         processing_res: Optional[int] = None,
@@ -219,28 +219,23 @@ class MarigoldPipeline(DiffusionPipeline):
 
         # ----------------- Image Preprocess -----------------
         # Convert to torch tensor
-        input_size = input_rgb.shape
+        input_size = input_field.shape
         assert (
-            4 == input_rgb.dim() and 3 == input_size[-3]
+            4 == input_field.dim() and 3 == input_size[-3]
         ), f"Wrong input shape {input_size}, expected [1, rgb, H, W]"
 
         # Resize image
         if processing_res > 0:
-            input_rgb = resize_max_res(
-                input_rgb,
+            input_field = resize_max_res(
+                input_field,
                 max_edge_resolution=processing_res,
                 resample_method=resample_method,
             )
 
-        # Normalize rgb values
-        rgb_norm: torch.Tensor = input_rgb / 255.0 * 2.0 - 1.0  #  [0, 255] -> [-1, 1]
-        rgb_norm = rgb_norm.to(self.dtype)
-        assert rgb_norm.min() >= -1.0 and rgb_norm.max() <= 1.0
-
         # ----------------- Predicting perspective field -----------------
         # Batch repeated input image
-        duplicated_rgb = rgb_norm.expand(ensemble_size, -1, -1, -1)
-        single_rgb_dataset = TensorDataset(duplicated_rgb)
+        duplicated_field = input_field.expand(ensemble_size, -1, -1, -1)
+        single_field_dataset = TensorDataset(duplicated_field)
         if batch_size > 0:
             _bs = batch_size
         else:
@@ -250,33 +245,33 @@ class MarigoldPipeline(DiffusionPipeline):
                 dtype=self.dtype,
             )
 
-        single_rgb_loader = DataLoader(
-            single_rgb_dataset, batch_size=_bs, shuffle=False
+        single_field_loader = DataLoader(
+            single_field_dataset, batch_size=_bs, shuffle=False
         )
 
         # Predict perspective field maps (batched)
-        field_pred_ls = []
+        rgb_pred_ls = []
         if show_progress_bar:
             iterable = tqdm(
-                single_rgb_loader, desc=" " * 2 + "Inference batches", leave=False
+                single_field_loader, desc=" " * 2 + "Inference batches", leave=False
             )
         else:
-            iterable = single_rgb_loader
+            iterable = single_field_loader
         for batch in iterable:
-            (batched_img,) = batch
-            field_pred_raw = self.single_infer(
-                rgb_in=batched_img,
+            (batched_field,) = batch
+            rgb_pred_raw = self.single_infer(
+                field_in=batched_field,
                 num_inference_steps=denoising_steps,
                 show_pbar=show_progress_bar,
                 generator=generator,
             )
-            field_pred_ls.append(field_pred_raw.detach())
-        field_preds = torch.concat(field_pred_ls, dim=0)
+            rgb_pred_ls.append(rgb_pred_raw.detach())
+        rgb_preds = torch.concat(rgb_pred_ls, dim=0)
         torch.cuda.empty_cache()  # clear vram cache for ensembling
 
         # ----------------- Test-time ensembling -----------------
         if ensemble_size > 1:
-            field_pred, pred_uncert = ensemble_depth(
+            rgb_pred, pred_uncert = ensemble_depth(
                 rgb_preds,
                 scale_invariant=self.scale_invariant,
                 shift_invariant=self.shift_invariant,
@@ -284,33 +279,34 @@ class MarigoldPipeline(DiffusionPipeline):
                 **(ensemble_kwargs or {}),
             )
         else:
-            field_pred = field_preds
+            rgb_pred = rgb_preds
             pred_uncert = None
 
         # Resize back to original resolution
         if match_input_res:
-            field_pred = resize(
-                depth_pred,
+            rgb_pred = resize(
+                rgb_pred,
                 input_size[-2:],
                 interpolation=resample_method,
                 antialias=True,
             )
 
         # Convert to numpy
-        field_pred = field_pred.squeeze()
-        field_pred = field_pred.cpu().permute(1,2,0).numpy()
+        rgb_pred = rgb_pred.squeeze()
+        rgb = rgb_pred.cpu().permute(1,2,0).numpy()
         if pred_uncert is not None:
             pred_uncert = pred_uncert.squeeze().cpu().numpy()
+        
+        rgb = (rgb + 1) * 255 / 2
 
-
-        rgb = input_rgb.squeeze().cpu().permute(1,2,0).numpy()
+        field = input_field.squeeze().cpu().permute(1,2,0).numpy()
 
         # Visualize; would need further work
-        field_visualized =  draw_perspective_fields(rgb, field_pred[:, :, :2], np.deg2rad(field_pred[:, :, 2] * 90))
+        field_visualized =  draw_perspective_fields(rgb, field[:, :, :2], np.deg2rad(field[:, :, 2] * 90))
 
         return MarigoldOutput (
             image = Image.fromarray((rgb).astype(np.uint8)),
-            field = torch.tensor(field_pred), 
+            field = torch.tensor(field), 
             field_visualized = Image.fromarray(field_visualized),
         )
 
@@ -353,7 +349,7 @@ class MarigoldPipeline(DiffusionPipeline):
     @torch.no_grad()
     def single_infer(
         self,
-        rgb_in: torch.Tensor,
+        field_in: torch.Tensor,
         num_inference_steps: int,
         generator: Union[torch.Generator, None],
         show_pbar: bool,
@@ -374,18 +370,18 @@ class MarigoldPipeline(DiffusionPipeline):
             `torch.Tensor`: Predicted depth map.
         """
         device = self.device
-        rgb_in = rgb_in.to(device)
+        field_in = field_in.to(device)
 
         # Set timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps  # [T]
 
         # Encode image
-        rgb_latent = self.encode_rgb(rgb_in) #flag
+        field_latent = self.encode_field(field_in) #flag
 
         # Initial depth map (noise)
-        field_latent = torch.randn(
-            rgb_latent.shape,
+        rgb_latent = torch.randn(
+            field_latent.shape,
             device=device,
             dtype=self.dtype,
             generator=generator,
@@ -411,7 +407,7 @@ class MarigoldPipeline(DiffusionPipeline):
 
         for i, t in iterable:
             unet_input = torch.cat(
-                [rgb_latent, field_latent], dim=1
+                [field_latent, rgb_latent], dim=1
             )  # this order is important
 
             # predict the noise residual
@@ -420,13 +416,13 @@ class MarigoldPipeline(DiffusionPipeline):
             ).sample  # [B, 4, h, w]
 
             # compute the previous noisy sample x_t -> x_t-1
-            field_latent = self.scheduler.step(
-                noise_pred, t, field_latent, generator=generator
+            rgb_latent = self.scheduler.step(
+                noise_pred, t, rgb_latent, generator=generator
             ).prev_sample
 
-        field = self.decode_field(field_latent)
+        rgb = self.decode_rgb(rgb_latent)
 
-        return field
+        return rgb
 
     def encode_rgb(self, rgb_in: torch.Tensor) -> torch.Tensor:
         """
@@ -449,6 +445,14 @@ class MarigoldPipeline(DiffusionPipeline):
         rgb_latent = mean * self.rgb_latent_scale_factor
         return rgb_latent
 
+    def decode_rgb(self, rgb_latent: torch.Tensor) -> torch.Tensor:
+
+        rgb_latent = rgb_latent / self.rgb_latent_scale_factor
+        # decode
+        z = self.vae.post_quant_conv(rgb_latent)
+        field = self.vae.decoder(z)
+
+        return field
 
     def encode_field(self, field_in: torch.Tensor) -> torch.Tensor:
         # encode

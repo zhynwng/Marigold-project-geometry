@@ -23,7 +23,7 @@ def visualize_image(image_path, field_path):
     plt.close()
 
 # Example usage
-image_path = '/home-nfs/zhiyanw/mini/test/image/real/396461.jpg'
+image_path = '/home-nfs/zhiyanw/mini/test/image/real/217699.jpg'
 # Replace with your image file path
-field_path = '/home-nfs/zhiyanw/mini/test/fields/real/real_396461.pt'
+field_path = '/home-nfs/zhiyanw/mini/test/fields/real/real_217699.pt'
 visualize_image(image_path, field_path)
