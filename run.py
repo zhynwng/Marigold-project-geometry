@@ -30,7 +30,7 @@ from tqdm.auto import tqdm
 
 from marigold import MarigoldPipeline
 
-EXTENSION_LIST = [".jpg", ".jpeg", ".png"]
+EXTENSION_LIST = [".jpg", ".jpeg", ".png", ".pt"]
 
 
 if "__main__" == __name__:
@@ -206,6 +206,7 @@ if "__main__" == __name__:
         checkpoint_path, variant=variant, torch_dtype=dtype
     )
 
+
     try:
         pipe.enable_xformers_memory_efficient_attention()
     except ImportError:
@@ -233,6 +234,11 @@ if "__main__" == __name__:
         for rgb_path in tqdm(rgb_filename_list, desc="Estimating depth", leave=True):
             # Read input image
             input_image = Image.open(rgb_path)
+            # input_field = torch.load(rgb_path)
+            # latitude_map = input_field['pred_latitude_original']
+            # gravity_maps = input_field['pred_gravity_original']
+            # latitude_map = latitude_map / 90
+            # input_field = torch.cat([gravity_maps, latitude_map.unsqueeze(0),], dim = 0).unsqueeze(0) # [B, C, h, w]
 
             # Random number generator
             if seed is None:
