@@ -329,10 +329,10 @@ class MarigoldPipeline(DiffusionPipeline):
         field_pred[:, :, 2] *= 90
 
         # Visualize; would need further work
-        field_visualized =  draw_perspective_fields(input_rgb.numpy(), field_pred[:, :, :2], np.deg2rad(field_pred[:, :, 2] * 90))
+        field_visualized =  draw_perspective_fields(rgb, field_pred[:, :, :2], np.deg2rad(field_pred[:, :, 2] * 90))
 
         return MarigoldOutput (
-            image = Image.fromarray((input_rgb).astype(np.uint8)),
+            image = Image.fromarray((rgb).astype(np.uint8)),
             field = torch.tensor(field_pred), 
             field_visualized = Image.fromarray(field_visualized),
         )
@@ -474,11 +474,6 @@ class MarigoldPipeline(DiffusionPipeline):
 
         field = self.decode_field(field_latent)
 
-        # clip prediction
-        field = torch.clip(field, -1.0, 1.0)
-        # shift to [0, 1]
-        field = (field + 1.0) / 2.0
-
         return field
 
     def plot_latent(self, rgb_latent, name):
@@ -521,6 +516,8 @@ class MarigoldPipeline(DiffusionPipeline):
         Returns:
             `torch.Tensor`: Image latent.
         """
+
+    
         # encode
         h = self.vae.encoder(rgb_in)
         moments = self.vae.quant_conv(h)
@@ -550,8 +547,6 @@ class MarigoldPipeline(DiffusionPipeline):
         Returns:
             `torch.Tensor`: Decoded depth map.
         """
-        # scale latent
-        field_latent = field_latent / self.rgb_latent_scale_factor
         # decode
         z = self.vae.post_quant_conv(field_latent)
         field = self.vae.decoder(z)
