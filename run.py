@@ -30,7 +30,7 @@ from tqdm.auto import tqdm
 
 from marigold import MarigoldPipeline
 
-EXTENSION_LIST = [".jpg", ".jpeg", ".png"]
+EXTENSION_LIST = [".jpg", ".jpeg", ".png", ".pt", ".npy"]
 
 
 if "__main__" == __name__:
@@ -232,7 +232,9 @@ if "__main__" == __name__:
 
         for rgb_path in tqdm(rgb_filename_list, desc="Estimating depth", leave=True):
             # Read input image
-            input_image = Image.open(rgb_path)
+            depth = torch.Tensor(np.load(rgb_path))
+            depth = depth.repeat(1, 3, 1, 1)
+
 
             # Random number generator
             if seed is None:
@@ -243,7 +245,7 @@ if "__main__" == __name__:
 
             # Predict depth
             pipe_out = pipe(
-                input_image,
+                depth,
                 denoising_steps=denoise_steps,
                 ensemble_size=ensemble_size,
                 processing_res=processing_res,

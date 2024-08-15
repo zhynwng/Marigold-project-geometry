@@ -247,8 +247,8 @@ class MarigoldPipeline(DiffusionPipeline):
             )
 
         # Normalize rgb values
-        rgb_norm: torch.Tensor = input_rgb / 255.0 * 2.0 - 1.0  #  [0, 255] -> [-1, 1]
-        rgb_norm = rgb_norm.to(self.dtype)
+        rgb_norm: torch.Tensor = input_rgb # / 255.0 * 2.0 - 1.0  #  [0, 255] -> [-1, 1]
+        # rgb_norm = rgb_norm.to(self.dtype)
         assert rgb_norm.min() >= -1.0 and rgb_norm.max() <= 1.0
 
         # ----------------- Predicting perspective field -----------------
@@ -427,7 +427,7 @@ class MarigoldPipeline(DiffusionPipeline):
         # Encode image
         rgb_latent = self.encode_rgb(rgb_in) # [B, 4, h, w]
 
-        latent_visualized = self.plot_latent(rgb_latent, "image")
+        latent_visualized = self.plot_latent(rgb_latent, "depth")
 
         # Initial depth map (noise)
         field_latent = torch.randn(
@@ -470,8 +470,6 @@ class MarigoldPipeline(DiffusionPipeline):
                 noise_pred, t, field_latent, generator=generator
             ).prev_sample
 
-        latent_visualized = self.plot_latent(field_latent, "field")
-
         field = self.decode_field(field_latent)
 
         return field
@@ -500,7 +498,7 @@ class MarigoldPipeline(DiffusionPipeline):
             
             # Save the image as a PNG file
             image_pil = Image.fromarray(image_np)
-            image_pil.save(f'/share/data/p2p/yz5880/Marigold/output/plot_latent/{name}_combination_{i+1}.png')
+            image_pil.save(f'/share/data/p2p/zhiyanw/plot_latent/{name}_combination_{i+1}.png')
 
             print(f"Saved {name}_combination_{i+1}.png")
 
