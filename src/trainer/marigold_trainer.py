@@ -94,7 +94,9 @@ class MarigoldTrainer:
         # Trainability
         self.model.vae.requires_grad_(False)
         self.model.text_encoder.requires_grad_(False)
-        self.model.unet.requires_grad_(True)
+        self.model.unet.requires_grad_(False)
+        for param in model.unet.conv_in.parameters():
+            param.requires_grad = True
 
         # Optimizer !should be defined after input layer is adapted
         lr = self.cfg.lr
