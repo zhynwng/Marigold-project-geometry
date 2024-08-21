@@ -527,7 +527,7 @@ class MarigoldPipeline(DiffusionPipeline):
             
             # Save the image as a PNG file
             image_pil = Image.fromarray(image_np)
-            image_pil.save(f'/share/data/p2p/yz5880/Marigold/output/plot_latent/{name}_combination_{i+1}.png')
+            image_pil.save(f'/share/data/p2p/zhiyanw/plot_latent/{name}_combination_{i+1}.png')
 
             logging.info(f"Saved {name}_combination_{i+1}.png")
 

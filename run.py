@@ -249,7 +249,7 @@ if "__main__" == __name__:
 
             # Predict depth
             pipe_out = pipe(
-                input_image,
+                depth,
                 denoising_steps=denoise_steps,
                 ensemble_size=ensemble_size,
                 processing_res=processing_res,
