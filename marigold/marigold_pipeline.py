@@ -148,10 +148,6 @@ class MarigoldPipeline(DiffusionPipeline):
 
         self.empty_text_embed = None
 
-        # Adapt input layers
-        # if 8 != self.unet.config["in_channels"]:
-        #     self._replace_unet_conv_in()
-
     @torch.no_grad()
     def __call__(
         self,
