@@ -83,7 +83,7 @@ class MarigoldTrainer:
 
         # Adapt input layers
         if 8 != self.model.unet.config["in_channels"]:
-            self._replace_unet_conv_in()
+            self._replace_unet_conv_in_zero_intialization()
 
         # Encode empty text prompt
         self.model.encode_empty_text()
@@ -94,9 +94,7 @@ class MarigoldTrainer:
         # Trainability
         self.model.vae.requires_grad_(False)
         self.model.text_encoder.requires_grad_(False)
-        self.model.unet.requires_grad_(False)
-        for param in model.unet.conv_in.parameters():
-            param.requires_grad = True
+        self.model.unet.requires_grad_(True)
 
         # Optimizer !should be defined after input layer is adapted
         lr = self.cfg.lr
@@ -189,6 +187,29 @@ class MarigoldTrainer:
         logging.info("Unet config is updated")
         return
 
+
+    def _replace_unet_conv_in_zero_intialization(self):
+        # replace the first layer to accept 8 in_channels
+        _weight = self.model.unet.conv_in.weight.clone()  # [320, 4, 3, 3]
+        _bias = self.model.unet.conv_in.bias.clone()  # [320]
+        _weight_add = torch.zeros(_weight.shape)
+        _weight = torch.cat((_weight_add, _weight), 1) # [320, 8, 3, 3]
+        # new conv_in channel
+        _n_convin_out_channel = self.model.unet.conv_in.out_channels
+        _new_conv_in = Conv2d(
+            8, _n_convin_out_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
+        )
+
+        _new_conv_in.weight = Parameter(_weight)
+        _new_conv_in.bias = Parameter(_bias)
+        self.model.unet.conv_in = _new_conv_in
+        logging.info("Unet conv_in layer is replaced")
+        # replace config
+        self.model.unet.config["in_channels"] = 8
+        logging.info("Unet config is updated with zero initialization")
+        return
+
+    
     def train(self, t_end=None):
         logging.info("Start training")
 
@@ -203,6 +224,8 @@ class MarigoldTrainer:
 
         self.train_metrics.reset()
         accumulated_step = 0
+
+        self.visualize()
 
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
@@ -501,6 +524,7 @@ class MarigoldTrainer:
             # Read input field
             # print(batch)
             field_in = batch["field"].to(self.device).to(torch.float32)
+            rgb_in = batch["image"].to(self.device).to(torch.float32)
             # [1, 3, H, W]
 
             # Random number generator
@@ -528,7 +552,7 @@ class MarigoldTrainer:
             image_pred: Image.Image = pipe_out.image
             field_pred: np.ndarray = pipe_out.field
             vis_pred: Image.Image = pipe_out.field_visualized
-
+            
             if save_to_dir is not None:
                 output_dir_jpg = os.path.join(save_to_dir, "image")
                 output_dir_field = os.path.join(save_to_dir, "field")

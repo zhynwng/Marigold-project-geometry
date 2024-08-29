@@ -76,7 +76,7 @@ validation:
   resample_method: bilinear
   main_val_metric: abs_relative_difference
   main_val_metric_goal: minimize
-  init_seed: 2024
+  init_seed: 1234
 
 eval:
   alignment: least_square
