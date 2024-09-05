@@ -180,7 +180,7 @@ class MarigoldPipeline(DiffusionPipeline):
 
         self.empty_text_embed = None
 
-
+        
     @torch.no_grad()
     def __call__(
         self,

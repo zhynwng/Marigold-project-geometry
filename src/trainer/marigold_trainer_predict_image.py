@@ -207,25 +207,6 @@ class MarigoldTrainerImage:
         logging.info("Unet config is updated with zero initialization")
         return
 
-    def _replace_unet_conv_in_random_intialization(self):
-        # replace the first layer to accept 8 in_channels
-        _weight = self.model.unet.conv_in.weight.clone()  # [320, 4, 3, 3]
-        _bias = self.model.unet.conv_in.bias.clone()  # [320]
-        _weight_add = torch.randn_like(_weight[:, :, :, :]) * 0.01  # Small random initialization
-        _weight = torch.cat((_weight, _weight_add), 1) # [320, 8, 3, 3]
-        # new conv_in channel
-        _n_convin_out_channel = self.model.unet.conv_in.out_channels
-        _new_conv_in = Conv2d(
-            8, _n_convin_out_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
-        )
-        _new_conv_in.weight = Parameter(_weight)
-        _new_conv_in.bias = Parameter(_bias)
-        self.model.unet.conv_in = _new_conv_in
-        logging.info("Unet conv_in layer is replaced")
-        # replace config
-        self.model.unet.config["in_channels"] = 8
-        logging.info("Unet config is updated with zero initialization")
-        return
 
     def train(self, t_end=None):
         logging.info("Start training to predict Image using Marigold")
@@ -544,6 +525,7 @@ class MarigoldTrainerImage:
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(seed)
 
+
             # Predict image
             pipe_out: MarigoldOutput = self.model(
                 rgb_int,
@@ -578,6 +560,7 @@ class MarigoldTrainerImage:
                 if os.path.exists(jpg_save_path):
                     logging.warning(f"Existing file: '{jpg_save_path}' will be overwritten")
                 image_pred.save(jpg_save_path)
+
 
                 # Save field                
                 field_save_path = os.path.join(output_dir_field, f"{pred_name_base}.pt")
