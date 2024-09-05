@@ -83,7 +83,7 @@ class MarigoldTrainer:
 
         # Adapt input layers
         if 8 != self.model.unet.config["in_channels"]:
-            self._replace_unet_conv_in()
+            self._replace_unet_conv_in_zero_intialization()
 
         # Encode empty text prompt
         self.model.encode_empty_text()
@@ -187,6 +187,28 @@ class MarigoldTrainer:
         logging.info("Unet config is updated")
         return
 
+    def _replace_unet_conv_in_zero_intialization(self):
+        # replace the first layer to accept 8 in_channels
+        _weight = self.model.unet.conv_in.weight.clone()  # [320, 4, 3, 3]
+        _bias = self.model.unet.conv_in.bias.clone()  # [320]
+        _weight_add = torch.zeros(_weight.shape)
+        _weight = torch.cat((_weight_add, _weight), 1) # [320, 8, 3, 3]
+        # new conv_in channel
+        _n_convin_out_channel = self.model.unet.conv_in.out_channels
+        _new_conv_in = Conv2d(
+            8, _n_convin_out_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
+        )
+
+        _new_conv_in.weight = Parameter(_weight)
+        _new_conv_in.bias = Parameter(_bias)
+        self.model.unet.conv_in = _new_conv_in
+        logging.info("Unet conv_in layer is replaced")
+        # replace config
+        self.model.unet.config["in_channels"] = 8
+        logging.info("Unet config is updated with zero initialization")
+        return
+
+
     def train(self, t_end=None):
         logging.info("Start training")
 
@@ -253,7 +275,7 @@ class MarigoldTrainer:
                         # calculate strength depending on t
                         strength = strength * (timesteps / self.scheduler_timesteps)
                     noise = multi_res_noise_like(
-                        field_latent,
+                        rgb_latent,
                         strength=strength,
                         downscale_strategy=self.mr_noise_downscale_strategy,
                         generator=rand_num_generator,
@@ -261,14 +283,14 @@ class MarigoldTrainer:
                     )
                 else:
                     noise = torch.randn(
-                        field_latent.shape,
+                        rgb_latent.shape,
                         device=device,
                         generator=rand_num_generator,
                     )  # [B, 4, h, w]
 
                 # Add noise to the latents (diffusion forward process)
                 noisy_latents = self.training_noise_scheduler.add_noise(
-                    field_latent, noise, timesteps
+                    rgb_latent, noise, timesteps
                 )  # [B, 4, h, w]
 
                 # Text embedding
@@ -278,7 +300,7 @@ class MarigoldTrainer:
 
                 # Concat field and rgb latents
                 cat_latents = torch.cat(
-                    [rgb_latent, noisy_latents], dim=1
+                    [field_latent, noisy_latents], dim=1
                 )  # [B, 8, h, w]
                 cat_latents = cat_latents.float()
 
@@ -497,8 +519,8 @@ class MarigoldTrainer:
             
             assert 1 == data_loader.batch_size
             # Read input field
-            # print(batch)
             rgb_int = batch["image"].to(self.device).to(torch.float32)
+            field_int = batch["field"].to(self.device).to(torch.float32)
             # [1, 3, H, W]
 
             # Random number generator
@@ -512,6 +534,7 @@ class MarigoldTrainer:
             # Predict depth
             pipe_out: MarigoldOutput = self.model(
                 rgb_int,
+                field_int,
                 denoising_steps=self.cfg.validation.denoising_steps,
                 ensemble_size=self.cfg.validation.ensemble_size,
                 processing_res=self.cfg.validation.processing_res,

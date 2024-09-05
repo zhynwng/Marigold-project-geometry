@@ -27,11 +27,21 @@ import torch
 from diffusers import (
     AutoencoderKL,
     DDIMScheduler,
+    # KarrasDiffusionSchedulers,
     DiffusionPipeline,
+    StableDiffusionMixin,
+    StableDiffusionXLPipeline,
     LCMScheduler,
     UNet2DConditionModel,
 )
+from diffusers.loaders import (
+    FromSingleFileMixin,
+    IPAdapterMixin,
+    StableDiffusionXLLoraLoaderMixin,
+    TextualInversionLoaderMixin,
+)
 from diffusers.utils import BaseOutput
+from diffusers.schedulers import KarrasDiffusionSchedulers
 from PIL import Image
 from torch.nn import Conv2d
 from torch.nn.parameter import Parameter
@@ -39,7 +49,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms.functional import pil_to_tensor, resize
 from tqdm.auto import tqdm
-from transformers import CLIPTextModel, CLIPTokenizer
+from transformers import CLIPTextModel, CLIPTokenizer, CLIPTextModelWithProjection, CLIPVisionModelWithProjection, CLIPImageProcessor
 
 from .util.batchsize import find_batch_size
 from .util.ensemble import ensemble_depth
@@ -70,38 +80,16 @@ class MarigoldOutput(BaseOutput):
     field: np.ndarray
     field_visualized: Image.Image
 
-# class CustomMarigoldModel(DiffusionPipeline):
-#     def __init__(
-#         self,
-#         unet: UNet2DConditionModel,
-#         vae: AutoencoderKL,
-#         scale_invariant: Optional[bool] = True,
-#         shift_invariant: Optional[bool] = True,
-#         default_denoising_steps: Optional[int] = None,
-#         default_processing_resolution: Optional[int] = None,
-#     ):
-#         super().__init__()
-#         self.unet = unet
-#         self.vae = vae
-#         self.encoder = self.replace_encoder()
 
-#     def replace_encoder(self):
-#         conv_layer_1 = Conv2d(in_channels=3, out_channels=3, kernel_size=1)
-#         nn.init.constant_(conv_layer.weight, 0.0)
-#         nn.init.constant_(conv_layer.bias, 0.0)
-#         conv_layer_2 = Conv2d(in_channels=4, out_channels=4, kernel_size=1)
-#         nn.init.constant_(conv_layer.weight, 0.0)
-#         nn.init.constant_(conv_layer.bias, 0.0)
-#         new_encoder = nn.Sequential(
-#             conv_layer_1,
-#             self.vae,
-#             conv_layer_2
-#         )
-#         return new_encoder
-
-
-
-class MarigoldPipeline(DiffusionPipeline):
+class MarigoldPipelineSDXL(
+    # StableDiffusionXLPipeline,
+    DiffusionPipeline,
+    StableDiffusionMixin,
+    FromSingleFileMixin,
+    StableDiffusionXLLoraLoaderMixin,
+    TextualInversionLoaderMixin,
+    IPAdapterMixin,
+    ):
     """
     Pipeline for monocular depth estimation using Marigold: https://marigoldmonodepth.github.io.
 
@@ -141,17 +129,52 @@ class MarigoldPipeline(DiffusionPipeline):
             with varying optimal processing resolution values.
     """
 
+    model_cpu_offload_seq = "text_encoder->text_encoder_2->image_encoder->unet->vae"
+    _optional_components = [
+        "tokenizer",
+        "tokenizer_2",
+        "text_encoder",
+        "text_encoder_2",
+        "image_encoder",
+        "feature_extractor",
+    ]
+    _callback_tensor_inputs = [
+        "latents",
+        "prompt_embeds",
+        "negative_prompt_embeds",
+        "add_text_embeds",
+        "add_time_ids",
+        "negative_pooled_prompt_embeds",
+        "negative_add_time_ids",
+    ]
+
     rgb_latent_scale_factor = 0.18215
     depth_latent_scale_factor = 0.18215
 
     def __init__(
+        # self,
+        # unet: UNet2DConditionModel,
+        # vae: AutoencoderKL,
+        # scheduler: Union[DDIMScheduler, LCMScheduler],
+        # text_encoder: CLIPTextModel,
+        # tokenizer: CLIPTokenizer,
+        # scale_invariant: Optional[bool] = True,
+        # shift_invariant: Optional[bool] = True,
+        # default_denoising_steps: Optional[int] = None,
+        # default_processing_resolution: Optional[int] = None,
+
         self,
-        unet: UNet2DConditionModel,
         vae: AutoencoderKL,
-        # pre_model: CustomMarigoldModel,
-        scheduler: Union[DDIMScheduler, LCMScheduler],
         text_encoder: CLIPTextModel,
+        text_encoder_2: CLIPTextModelWithProjection,
         tokenizer: CLIPTokenizer,
+        tokenizer_2: CLIPTokenizer,
+        unet: UNet2DConditionModel,
+        scheduler: KarrasDiffusionSchedulers,
+        image_encoder: CLIPVisionModelWithProjection = None,
+        feature_extractor: CLIPImageProcessor = None,
+        force_zeros_for_empty_prompt: bool = True,
+        add_watermarker: Optional[bool] = None,
         scale_invariant: Optional[bool] = True,
         shift_invariant: Optional[bool] = True,
         default_denoising_steps: Optional[int] = None,
@@ -159,14 +182,18 @@ class MarigoldPipeline(DiffusionPipeline):
     ):
         super().__init__()
         self.register_modules(
-            unet=unet,
             vae=vae,
-            # pre_model = CustomMarigoldModel,
-            scheduler=scheduler,
             text_encoder=text_encoder,
+            text_encoder_2=text_encoder_2,
             tokenizer=tokenizer,
+            tokenizer_2=tokenizer_2,
+            unet=unet,
+            scheduler=scheduler,
+            image_encoder=image_encoder,
+            feature_extractor=feature_extractor,
         )
         self.register_to_config(
+            force_zeros_for_empty_prompt=force_zeros_for_empty_prompt,
             scale_invariant=scale_invariant,
             shift_invariant=shift_invariant,
             default_denoising_steps=default_denoising_steps,
@@ -180,7 +207,10 @@ class MarigoldPipeline(DiffusionPipeline):
 
         self.empty_text_embed = None
 
-        
+        # Adapt input layers
+        if 8 != self.unet.config["in_channels"]:
+            self._replace_unet_conv_in_zero_intialization()
+
     @torch.no_grad()
     def __call__(
         self,
@@ -289,7 +319,7 @@ class MarigoldPipeline(DiffusionPipeline):
         rgb_norm = rgb_norm.to(self.dtype)        
         assert rgb_norm.min() >= -1.0 and rgb_norm.max() <= 1.0
 
-        # ----------------- Predicting image -----------------
+        # ----------------- Predicting perspective field -----------------
         image_ls = []
         # Batch repeated input image
         duplicated_rgb = rgb_norm.expand(ensemble_size, -1, -1, -1) # [B, C, 256, 256]
@@ -317,7 +347,7 @@ class MarigoldPipeline(DiffusionPipeline):
         for batch in iterable:
             (batched_img,) = batch
             image_pred = self.single_infer(
-                rgb_in=None,
+                rgb_in=batched_img,
                 field_in=input_field,
                 num_inference_steps=denoising_steps,
                 show_pbar=show_progress_bar,
@@ -348,6 +378,49 @@ class MarigoldPipeline(DiffusionPipeline):
             field_visualized = Image.fromarray(field_visualized),
         )
 
+    def _replace_unet_conv_in(self):
+        # replace the first layer to accept 8 in_channels
+        _weight = self.unet.conv_in.weight.clone()  # [320, 4, 3, 3]
+        _bias = self.unet.conv_in.bias.clone()  # [320]
+        _weight = _weight.repeat((1, 2, 1, 1))  # Keep selected channel(s)
+        # half the activation magnitude
+        _weight *= 0.5
+        # new conv_in channel
+        _n_convin_out_channel = self.unet.conv_in.out_channels
+        _new_conv_in = Conv2d(
+            8, _n_convin_out_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
+        )
+        _new_conv_in.weight = Parameter(_weight)
+        _new_conv_in.bias = Parameter(_bias)
+        self.unet.conv_in = _new_conv_in
+        logging.info("Unet conv_in layer is replaced")
+        # replace config
+        self.unet.config["in_channels"] = 8
+        logging.info("Unet config is updated")
+        return
+
+    def _replace_unet_conv_in_zero_intialization(self):
+        # replace the first layer to accept 8 in_channels
+        _weight = self.unet.conv_in.weight.clone()  # [320, 4, 3, 3]
+        _bias = self.unet.conv_in.bias.clone()  # [320]
+        _weight_add = torch.zeros((320, 4, 3, 3))
+        _weight = torch.cat((_weight, _weight_add), 1)
+        # _weight = _weight.repeat((1, 2, 1, 1))  # Keep selected channel(s) # [320, 8, 3, 3]
+        # half the activation magnitude
+        # _weight *= 0.5
+        # new conv_in channel
+        _n_convin_out_channel = self.unet.conv_in.out_channels
+        _new_conv_in = Conv2d(
+            8, _n_convin_out_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
+        )
+        _new_conv_in.weight = Parameter(_weight)
+        _new_conv_in.bias = Parameter(_bias)
+        self.unet.conv_in = _new_conv_in
+        logging.info("Unet conv_in layer is replaced")
+        # replace config
+        self.unet.config["in_channels"] = 8
+        logging.info("Unet config is updated")
+        return
 
     def _check_inference_step(self, n_step: int) -> None:
         """
@@ -385,10 +458,10 @@ class MarigoldPipeline(DiffusionPipeline):
         """
         Encode text embedding for empty prompt
         """
-        prompt = "a photograph of an indoor room"
+        prompt = ""
         text_inputs = self.tokenizer(
             prompt,
-            padding="max_length",
+            padding="do_not_pad",
             max_length=self.tokenizer.model_max_length,
             truncation=True,
             return_tensors="pt",
@@ -421,29 +494,39 @@ class MarigoldPipeline(DiffusionPipeline):
             `torch.Tensor`: Predicted depth map.
         """
         device = self.device
-        field_in = field_in.to(device)
-        if rgb_in != None:
+        rgb_in = rgb_in.to(device)
+        if field_in != None:
             # logging.info("Output image is conditioned on field map!")
-            rgb_in = rgb_in.to(device)
+            field_in = field_in.to(device)
 
         # Set timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps  # [T]
 
         # Encode image
-        field_latent = self.encode_field(field_in) # [B, 4, h, w]       
-
-        # latent_visualized = self.plot_latent(rgb_latent, "image") # replace name to "field" if plotting field latent
-
+        rgb_in = None
         if rgb_in != None:
-            rgb_latent = self.encode_rgb(rgb_in)
-        else:
+            rgb_latent = self.encode_rgb(rgb_in) # [B, 4, h, w] 
+        else: 
             rgb_latent = torch.randn(
-                field_latent.shape,
+                [1, 4, 32, 32],
                 device=device,
                 dtype=self.dtype,
                 generator=generator,
-            )  # [B, 4, h, w]
+                ) * self.rgb_latent_scale_factor
+
+        # latent_visualized = self.plot_latent(rgb_latent, "image") # replace name to "field" if plotting field latent
+
+        # Initial depth map        
+        # if field_in != None:
+        field_latent = self.encode_field(field_in)
+        # else:
+            # field_latent = torch.randn(
+            #     rgb_latent.shape,
+            #     device=device,
+            #     dtype=self.dtype,
+            #     generator=generator,
+            # )  # [B, 4, h, w]
 
         # Batched empty text embedding
         if self.empty_text_embed is None:

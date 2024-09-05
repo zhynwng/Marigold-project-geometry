@@ -231,9 +231,18 @@ if "__main__" == __name__:
     with torch.no_grad():
         os.makedirs(output_dir, exist_ok=True)
 
-        for rgb_path in tqdm(rgb_filename_list, desc="Estimating depth", leave=True):
+        for i in tqdm(range(0, len(rgb_filename_list) - 1, 2), desc="Estimating depth", leave=True):
+            rgb_path_1 = rgb_filename_list[i]
+            rgb_path_2 = rgb_filename_list[i + 1]
+            input_image = Image.open(rgb_path_1)
+            input_field = torch.load(rgb_path_2)
+            latitude_map = input_field['pred_latitude_original']
+            gravity_maps = input_field['pred_gravity_original']
+            latitude_map = latitude_map / 90
+            input_field = torch.cat([gravity_maps, latitude_map.unsqueeze(0),], dim = 0).unsqueeze(0) # [B, C, h, w]
+        # for rgb_path in tqdm(rgb_filename_list, desc="Estimating depth", leave=True):
             # Read input image
-            input_image = Image.open(rgb_path)
+            # input_image = Image.open(rgb_path)
             # input_field = torch.load(rgb_path)
             # latitude_map = input_field['pred_latitude_original']
             # gravity_maps = input_field['pred_gravity_original']
@@ -249,7 +258,8 @@ if "__main__" == __name__:
 
             # Predict depth
             pipe_out = pipe(
-                depth,
+                input_image,
+                input_field,
                 denoising_steps=denoise_steps,
                 ensemble_size=ensemble_size,
                 processing_res=processing_res,
@@ -261,30 +271,33 @@ if "__main__" == __name__:
                 generator=generator,
             )
 
-            depth_pred: np.ndarray = pipe_out.depth_np
-            depth_colored: Image.Image = pipe_out.depth_colored
+            image_pred: Image.Image = pipe_out.image
+            field_pred: np.ndarray = pipe_out.field
+            # depth_pred: np.ndarray = pipe_out.depth_np
+            # depth_colored: Image.Image = pipe_out.depth_colored
 
             # Save as npy
-            rgb_name_base = os.path.splitext(os.path.basename(rgb_path))[0]
+            rgb_name_base = os.path.splitext(os.path.basename(rgb_path_1))[0]
             pred_name_base = rgb_name_base + "_pred"
-            npy_save_path = os.path.join(output_dir_npy, f"{pred_name_base}.npy")
-            if os.path.exists(npy_save_path):
-                logging.warning(f"Existing file: '{npy_save_path}' will be overwritten")
-            np.save(npy_save_path, depth_pred)
+            # npy_save_path = os.path.join(output_dir_npy, f"{pred_name_base}.npy")
+            # if os.path.exists(npy_save_path):
+            #     logging.warning(f"Existing file: '{npy_save_path}' will be overwritten")
+            # np.save(npy_save_path, depth_pred)
 
             # Save as 16-bit uint png
-            depth_to_save = (depth_pred * 65535.0).astype(np.uint16)
+            # depth_to_save = (depth_pred * 65535.0).astype(np.uint16)
             png_save_path = os.path.join(output_dir_tif, f"{pred_name_base}.png")
             if os.path.exists(png_save_path):
                 logging.warning(f"Existing file: '{png_save_path}' will be overwritten")
-            Image.fromarray(depth_to_save).save(png_save_path, mode="I;16")
+
+            Image.fromarray(np.array(image_pred)).save(png_save_path, mode="I;16")
 
             # Colorize
-            colored_save_path = os.path.join(
-                output_dir_color, f"{pred_name_base}_colored.png"
-            )
-            if os.path.exists(colored_save_path):
-                logging.warning(
-                    f"Existing file: '{colored_save_path}' will be overwritten"
-                )
-            depth_colored.save(colored_save_path)
+            # colored_save_path = os.path.join(
+            #     output_dir_color, f"{pred_name_base}_colored.png"
+            # )
+            # if os.path.exists(colored_save_path):
+            #     logging.warning(
+            #         f"Existing file: '{colored_save_path}' will be overwritten"
+            #     )
+            # depth_colored.save(colored_save_path)

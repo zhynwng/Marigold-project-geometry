@@ -24,6 +24,7 @@
 
 import logging
 import os
+import sys
 import shutil
 from datetime import datetime
 from typing import List, Union
@@ -41,6 +42,7 @@ from tqdm import tqdm
 from PIL import Image
 
 from marigold.marigold_pipeline import MarigoldPipeline, MarigoldOutput
+from marigold.marigold_pipeline_sdxl import MarigoldPipelineSDXL, MarigoldOutput
 from src.util import metric
 from src.util.data_loader import skip_first_batches
 from src.util.logging_util import tb_logger, eval_dic_to_text
@@ -52,11 +54,11 @@ from src.util.alignment import align_depth_least_square
 from src.util.seeding import generate_seed_sequence
 
 
-class MarigoldTrainerImage:
+class MarigoldTrainerImageSDXL:
     def __init__(
         self,
         cfg: OmegaConf,
-        model: MarigoldPipeline,
+        model: MarigoldPipelineSDXL,
         train_dataloader: DataLoader,
         device,
         base_ckpt_dir,
@@ -207,6 +209,25 @@ class MarigoldTrainerImage:
         logging.info("Unet config is updated with zero initialization")
         return
 
+    def _replace_unet_conv_in_random_intialization(self):
+        # replace the first layer to accept 8 in_channels
+        _weight = self.model.unet.conv_in.weight.clone()  # [320, 4, 3, 3]
+        _bias = self.model.unet.conv_in.bias.clone()  # [320]
+        _weight_add = torch.randn_like(_weight[:, :, :, :]) * 0.01  # Small random initialization
+        _weight = torch.cat((_weight, _weight_add), 1) # [320, 8, 3, 3]
+        # new conv_in channel
+        _n_convin_out_channel = self.model.unet.conv_in.out_channels
+        _new_conv_in = Conv2d(
+            8, _n_convin_out_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
+        )
+        _new_conv_in.weight = Parameter(_weight)
+        _new_conv_in.bias = Parameter(_bias)
+        self.model.unet.conv_in = _new_conv_in
+        logging.info("Unet conv_in layer is replaced")
+        # replace config
+        self.model.unet.config["in_channels"] = 8
+        logging.info("Unet config is updated with zero initialization")
+        return
 
     def train(self, t_end=None):
         logging.info("Start training to predict Image using Marigold")
@@ -301,11 +322,84 @@ class MarigoldTrainerImage:
                 cat_latents = torch.cat(
                     [noisy_latents, field_latent], dim=1
                 )  # [B, 8, h, w]
-                cat_latents = cat_latents.float()
+                cat_latents = cat_latents.float()           
+
+                # add text embeds
+                height = 1024
+                width = 1024
+                crops_coords_top_left = (0, 0)
+                original_size = (height, width)
+                target_size = (height, width)
+                num_images_per_prompt = 1
+
+                prompt = ""
+                prompt = [prompt] if isinstance(prompt, str) else prompt
+
+                # Define tokenizers and text encoders
+                tokenizers = [self.model.tokenizer, self.model.tokenizer_2]
+                text_encoders = (
+                    [self.model.text_encoder, self.model.text_encoder_2]
+                )
+
+                prompt_2 = prompt
+                prompt_2 = [prompt_2] if isinstance(prompt_2, str) else prompt_2
+
+                # textual inversion: process multi-vector tokens if necessary
+                prompt_embeds_list = []
+                prompts = [prompt, prompt_2]
+                for prompt, tokenizer, text_encoder in zip(prompts, tokenizers, text_encoders):
+                    text_inputs = tokenizer(
+                        prompt,
+                        padding="max_length",
+                        max_length=tokenizer.model_max_length,
+                        truncation=True,
+                        return_tensors="pt",
+                    )
+
+                    text_input_ids = text_inputs.input_ids
+                    untruncated_ids = tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
+
+                    if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(
+                        text_input_ids, untruncated_ids
+                    ):
+                        removed_text = tokenizer.batch_decode(untruncated_ids[:, tokenizer.model_max_length - 1 : -1])
+
+                    prompt_embeds = text_encoder(text_input_ids.to(device), output_hidden_states=True)
+
+                    # We are only ALWAYS interested in the pooled output of the final text encoder
+                    pooled_prompt_embeds = prompt_embeds[0][0, :1]
+
+                    prompt_embeds = prompt_embeds.hidden_states[-2]
+
+                    prompt_embeds_list.append(prompt_embeds)
+
+                prompt_embeds = torch.concat(prompt_embeds_list, dim=-1)
+
+
+                if  self.model.text_encoder_2 is not None:
+                    prompt_embeds = prompt_embeds.to(dtype=self.model.text_encoder_2.dtype, device=device)
+
+                bs_embed, seq_len, _ = prompt_embeds.shape
+                # duplicate text embeddings for each generation per prompt, using mps friendly method
+                prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
+                prompt_embeds = prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
+
+                pooled_prompt_embeds = pooled_prompt_embeds.repeat(1, num_images_per_prompt).view(
+                    bs_embed * num_images_per_prompt, -1
+                )
+
+                pooled_prompt_embeds = pooled_prompt_embeds.to(device)
+                add_text_embeds = pooled_prompt_embeds
+
+                # add time ids
+                add_time_ids = list(original_size + crops_coords_top_left + target_size)
+                add_time_ids = torch.tensor([add_time_ids], dtype=prompt_embeds.dtype).to(device)  
+
+                added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
 
                 # Predict the noise residual
                 model_pred = self.model.unet(
-                    cat_latents, timesteps, text_embed
+                    cat_latents, timesteps, text_embed, added_cond_kwargs=added_cond_kwargs,
                 ).sample  # [B, 4, h, w]
                 if torch.isnan(model_pred).any():
                     logging.warning("model_pred contains NaN.")
@@ -525,7 +619,6 @@ class MarigoldTrainerImage:
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(seed)
 
-
             # Predict image
             pipe_out: MarigoldOutput = self.model(
                 rgb_int,
@@ -560,7 +653,6 @@ class MarigoldTrainerImage:
                 if os.path.exists(jpg_save_path):
                     logging.warning(f"Existing file: '{jpg_save_path}' will be overwritten")
                 image_pred.save(jpg_save_path)
-
 
                 # Save field                
                 field_save_path = os.path.join(output_dir_field, f"{pred_name_base}.pt")
