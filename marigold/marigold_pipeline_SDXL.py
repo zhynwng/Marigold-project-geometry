@@ -26,12 +26,10 @@ import numpy as np
 import torch
 from diffusers import (
     AutoencoderKL,
-    DDIMScheduler,
-    # KarrasDiffusionSchedulers,
+    EulerDiscreteScheduler,
     DiffusionPipeline,
     StableDiffusionMixin,
     StableDiffusionXLPipeline,
-    LCMScheduler,
     UNet2DConditionModel,
 )
 from diffusers.loaders import (
@@ -41,7 +39,6 @@ from diffusers.loaders import (
     TextualInversionLoaderMixin,
 )
 from diffusers.utils import BaseOutput
-from diffusers.schedulers import KarrasDiffusionSchedulers
 from PIL import Image
 from torch.nn import Conv2d
 from torch.nn.parameter import Parameter
@@ -63,9 +60,9 @@ from .util.image_util import (
 from perspective2d.utils import draw_perspective_fields
 import matplotlib.pyplot as plt
 
-class MarigoldOutput(BaseOutput):
+class SDXLOutput(BaseOutput):
     """
-    Output class for Marigold monocular depth prediction pipeline.
+    Output class for SDXL pipeline that finetuned on perspective field
 
     Args:
         depth_np (`np.ndarray`):
@@ -81,8 +78,8 @@ class MarigoldOutput(BaseOutput):
     field_visualized: Image.Image
 
 
-class MarigoldPipelineSDXL(
-    # StableDiffusionXLPipeline,
+class SDXLPipeline(
+    StableDiffusionXLPipeline,
     DiffusionPipeline,
     StableDiffusionMixin,
     FromSingleFileMixin,
@@ -91,7 +88,7 @@ class MarigoldPipelineSDXL(
     IPAdapterMixin,
     ):
     """
-    Pipeline for monocular depth estimation using Marigold: https://marigoldmonodepth.github.io.
+    Pipeline for SDXL model finetuned on perspective field
 
     This model inherits from [`DiffusionPipeline`]. Check the superclass documentation for the generic methods the
     library implements for all the pipelines (such as downloading or saving, running on a particular device, etc.)
@@ -170,7 +167,7 @@ class MarigoldPipelineSDXL(
         tokenizer: CLIPTokenizer,
         tokenizer_2: CLIPTokenizer,
         unet: UNet2DConditionModel,
-        scheduler: KarrasDiffusionSchedulers,
+        scheduler: EulerDiscreteScheduler,
         image_encoder: CLIPVisionModelWithProjection = None,
         feature_extractor: CLIPImageProcessor = None,
         force_zeros_for_empty_prompt: bool = True,
@@ -180,7 +177,7 @@ class MarigoldPipelineSDXL(
         default_denoising_steps: Optional[int] = None,
         default_processing_resolution: Optional[int] = None,
     ):
-        super().__init__()
+        super().__init__(vae, text_encoder, text_encoder_2, tokenizer, tokenizer_2, unet, scheduler)
         self.register_modules(
             vae=vae,
             text_encoder=text_encoder,
@@ -205,16 +202,17 @@ class MarigoldPipelineSDXL(
         self.default_denoising_steps = default_denoising_steps
         self.default_processing_resolution = default_processing_resolution
 
-        self.empty_text_embed = None
+        self.prompt_embeds = None
+        self.pooled_prompt_embeds = None
+        self.add_time_ids = None
+        self.add_text_embeds = None
 
-        # Adapt input layers
-        if 8 != self.unet.config["in_channels"]:
-            self._replace_unet_conv_in_zero_intialization()
+        self.unet.to(self.device)
+
 
     @torch.no_grad()
     def __call__(
         self,
-        input_image: Union[Image.Image, torch.Tensor],
         input_field: Union[Image.Image, torch.Tensor, None],
         denoising_steps: Optional[int] = None,
         ensemble_size: int = 5,
@@ -226,7 +224,7 @@ class MarigoldPipelineSDXL(
         color_map: str = "Spectral",
         show_progress_bar: bool = True,
         ensemble_kwargs: Dict = None,
-    ) -> MarigoldOutput:
+    ) -> SDXLOutput:
         """
         Function invoked when calling the pipeline.
 
@@ -280,50 +278,27 @@ class MarigoldPipelineSDXL(
         assert ensemble_size >= 1
 
         # Check if denoising step is reasonable
-        self._check_inference_step(denoising_steps)
-
         resample_method: InterpolationMode = get_tv_resample_method(resample_method)
 
-        # ----------------- Image Preprocess -----------------
-        # Convert to torch tensor
-        if isinstance(input_image, Image.Image):
-            input_image = input_image.convert("RGB")
-            # convert to torch tensor [H, W, rgb] -> [rgb, H, W]
-            rgb = pil_to_tensor(input_image)
-            noisy_rgb = noisy_image(rgb) # add 5-step noise to input image
-
-            # input_rgb = rgb.unsqueeze(0)  # [1, rgb, H, W]
-            input_rgb = noisy_rgb.unsqueeze(0)  # [1, rgb, H, W]
-        elif isinstance(input_image, torch.Tensor):
-            input_rgb = input_image
-        input_size = input_rgb.shape # [B, C, h, w]
+        # ----------------- Field Preprocess -----------------
+        input_size = input_field.shape # [B, C, h, w]
         assert (
-            4 == input_rgb.dim() and 3 == input_size[-3]
+            4 == input_field.dim() and 3 == input_size[-3]
         ), f"Wrong input shape {input_size}, expected [1, rgb, H, W]"
 
         # Resize image
         if processing_res > 0:
-            input_rgb = resize_max_res(
-                input_rgb,
+            input_field = resize_max_res(
+                input_field,
                 max_edge_resolution=processing_res,
                 resample_method=resample_method,
             )
 
-        # Normalize rgb values
-        rgb_norm: torch.Tensor = input_rgb / 255.0 * 2.0 - 1.0  #  [0, 255] -> [-1, 1]
-        # if input_field != None:
-        #     field_norm: torch.Tensor = 2 * ((input_field - input_field.min()) / (input_field.max() - input_field.min())) - 1 # normalize field
-        #     field_norm = field_norm.to(self.dtype)
-        # else:
-        #     field_norm = None
-        rgb_norm = rgb_norm.to(self.dtype)        
-        assert rgb_norm.min() >= -1.0 and rgb_norm.max() <= 1.0
-
-        # ----------------- Predicting perspective field -----------------
+        # ----------------- Predicting images -----------------
         image_ls = []
         # Batch repeated input image
-        duplicated_rgb = rgb_norm.expand(ensemble_size, -1, -1, -1) # [B, C, 256, 256]
-        single_rgb_dataset = TensorDataset(duplicated_rgb)
+        duplicated_field = input_field.expand(ensemble_size, -1, -1, -1) # [B, C, 256, 256]
+        single_field_dataset = TensorDataset(duplicated_field)
         if batch_size > 0:
             _bs = batch_size
         else:
@@ -332,31 +307,29 @@ class MarigoldPipelineSDXL(
                 input_res=max(rgb_norm.shape[1:]),
                 dtype=self.dtype,
             )
-        single_rgb_loader = DataLoader(
-            single_rgb_dataset, batch_size=_bs, shuffle=False
+        single_field_loader = DataLoader(
+            single_field_dataset, batch_size=_bs, shuffle=False
         )
 
         # Predict perspective field maps (batched)
         field_pred_ls = []
         if show_progress_bar:
             iterable = tqdm(
-                single_rgb_loader, desc=" " * 2 + "Inference batches", leave=False
+                single_field_loader, desc=" " * 2 + "Inference batches", leave=False
             )
         else:
-            iterable = single_rgb_loader
+            iterable = single_field_loader
         for batch in iterable:
-            (batched_img,) = batch
+            (batched_field,) = batch
             image_pred = self.single_infer(
-                rgb_in=batched_img,
-                field_in=input_field,
+                field_in=batched_field,
                 num_inference_steps=denoising_steps,
                 show_pbar=show_progress_bar,
                 generator=generator,
             )
             image_ls.append(image_pred.detach())
-            # field_pred_ls.append(field_pred_raw.detach())
+
         image_preds = torch.concat(image_ls, dim=0)
-        # field_preds = torch.concat(field_pred_ls, dim=0)
         torch.cuda.empty_cache()  # clear vram cache for ensembling
 
         # ----------------- Test-time ensembling -----------------
@@ -372,107 +345,111 @@ class MarigoldPipelineSDXL(
         # Visualize; would need further work
         field_visualized =  draw_perspective_fields(image_pred, field_pred[:, :, :2], np.deg2rad(field_pred[:, :, 2] * 90))
 
-        return MarigoldOutput (
+        return SDXLOutput (
             image = Image.fromarray((image_pred).astype(np.uint8)),
             field = torch.tensor(field_pred), 
             field_visualized = Image.fromarray(field_visualized),
         )
 
-    def _replace_unet_conv_in(self):
-        # replace the first layer to accept 8 in_channels
-        _weight = self.unet.conv_in.weight.clone()  # [320, 4, 3, 3]
-        _bias = self.unet.conv_in.bias.clone()  # [320]
-        _weight = _weight.repeat((1, 2, 1, 1))  # Keep selected channel(s)
-        # half the activation magnitude
-        _weight *= 0.5
-        # new conv_in channel
-        _n_convin_out_channel = self.unet.conv_in.out_channels
-        _new_conv_in = Conv2d(
-            8, _n_convin_out_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
+
+    @torch.no_grad()
+    def encode_prompt(self):
+        """
+        Encode text embedding for a given prompt
+        """
+        num_images_per_prompt = 1
+        device = self.device
+        prompt = "a realistic picture of an indoor room"
+        prompt = [prompt]
+        batch_size = 1
+
+        # Define tokenizers and text encoders
+        tokenizers = [self.tokenizer, self.tokenizer_2]
+        text_encoders = (
+            [self.text_encoder, self.text_encoder_2]
         )
-        _new_conv_in.weight = Parameter(_weight)
-        _new_conv_in.bias = Parameter(_bias)
-        self.unet.conv_in = _new_conv_in
-        logging.info("Unet conv_in layer is replaced")
-        # replace config
-        self.unet.config["in_channels"] = 8
-        logging.info("Unet config is updated")
-        return
 
-    def _replace_unet_conv_in_zero_intialization(self):
-        # replace the first layer to accept 8 in_channels
-        _weight = self.unet.conv_in.weight.clone()  # [320, 4, 3, 3]
-        _bias = self.unet.conv_in.bias.clone()  # [320]
-        _weight_add = torch.zeros((320, 4, 3, 3))
-        _weight = torch.cat((_weight, _weight_add), 1)
-        # _weight = _weight.repeat((1, 2, 1, 1))  # Keep selected channel(s) # [320, 8, 3, 3]
-        # half the activation magnitude
-        # _weight *= 0.5
-        # new conv_in channel
-        _n_convin_out_channel = self.unet.conv_in.out_channels
-        _new_conv_in = Conv2d(
-            8, _n_convin_out_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
+        prompt_2 = prompt
+        # textual inversion: process multi-vector tokens if necessary
+        prompt_embeds_list = []
+        prompts = [prompt, prompt_2]
+        for prompt, tokenizer, text_encoder in zip(prompts, tokenizers, text_encoders):
+            text_inputs = tokenizer(
+                prompt,
+                padding="max_length",
+                max_length= tokenizer.model_max_length,
+                truncation=True,
+                return_tensors="pt",
+            )
+
+            text_input_ids = text_inputs.input_ids
+            untruncated_ids = tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
+
+            if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(
+                text_input_ids, untruncated_ids
+            ):
+                removed_text = tokenizer.batch_decode(untruncated_ids[:, tokenizer.model_max_length - 1 : -1])
+
+            prompt_embeds = text_encoder(text_input_ids.to(device), output_hidden_states=True)
+
+            # We are only ALWAYS interested in the pooled output of the final text encoder
+            pooled_prompt_embeds = prompt_embeds[0]
+
+            prompt_embeds = prompt_embeds.hidden_states[-2]
+            prompt_embeds_list.append(prompt_embeds)
+
+        prompt_embeds = torch.concat(prompt_embeds_list, dim=-1)
+
+
+        if self.text_encoder_2 is not None:
+            prompt_embeds = prompt_embeds.to(dtype=self.text_encoder_2.dtype, device=device)
+
+        bs_embed, seq_len, _ = prompt_embeds.shape
+        # duplicate text embeddings for each generation per prompt, using mps friendly method
+        prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
+        prompt_embeds = prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
+
+        pooled_prompt_embeds = pooled_prompt_embeds.repeat(1, num_images_per_prompt).view(
+            bs_embed * num_images_per_prompt, -1
         )
-        _new_conv_in.weight = Parameter(_weight)
-        _new_conv_in.bias = Parameter(_bias)
-        self.unet.conv_in = _new_conv_in
-        logging.info("Unet conv_in layer is replaced")
-        # replace config
-        self.unet.config["in_channels"] = 8
-        logging.info("Unet config is updated")
-        return
 
-    def _check_inference_step(self, n_step: int) -> None:
-        """
-        Check if denoising step is reasonable
-        Args:
-            n_step (`int`): denoising steps
-        """
-        assert n_step >= 1
+        self.prompt_embeds = prompt_embeds
+        self.pooled_prompt_embeds = pooled_prompt_embeds.to(device)
 
-        if isinstance(self.scheduler, DDIMScheduler):
-            if n_step < 10:
-                logging.warning(
-                    f"Too few denoising steps: {n_step}. Recommended to use the LCM checkpoint for few-step inference."
-                )
-        elif isinstance(self.scheduler, LCMScheduler):
-            if not 1 <= n_step <= 4:
-                logging.warning(
-                    f"Non-optimal setting of denoising steps: {n_step}. Recommended setting is 1-4 steps."
-                )
-        else:
-            raise RuntimeError(f"Unsupported scheduler type: {type(self.scheduler)}")
 
-    def noisy_image(self, rgb, noise_factor=0.1):
-        # vanilla method for generating noisy image
-        noise = torch.randn(rgb.size()) * noise_factor
-        noisy_rgb = rgb + noise
-        for i in range(4):
-            noisy_rgb += torch.randn(rgb.size()) * noise_factor
-        noisy_rgb = torch.clamp(noisy_rgb, 0., 255.)
-        logging.info("Image noise added!")
 
-        return noisy_rgb
+    @torch.no_grad()
+    def get_time_ids(self):
+        '''
+        Add time ids for the model
+        '''
 
-    def encode_empty_text(self):
-        """
-        Encode text embedding for empty prompt
-        """
-        prompt = ""
-        text_inputs = self.tokenizer(
-            prompt,
-            padding="do_not_pad",
-            max_length=self.tokenizer.model_max_length,
-            truncation=True,
-            return_tensors="pt",
+        device = self.device
+        original_size = (256, 256)
+        target_size = (256, 256)
+        crops_coords_top_left = (0, 0)
+
+        self.add_text_embeds = self.pooled_prompt_embeds.to(device)
+        text_encoder_projection_dim = int(self.pooled_prompt_embeds.shape[-1])
+
+        add_time_ids = list(original_size + crops_coords_top_left + target_size)
+
+        passed_add_embed_dim = (
+            self.unet.config.addition_time_embed_dim * len(add_time_ids) + text_encoder_projection_dim
         )
-        text_input_ids = text_inputs.input_ids.to(self.text_encoder.device)
-        self.empty_text_embed = self.text_encoder(text_input_ids)[0].to(self.dtype)
+        expected_add_embed_dim = self.unet.add_embedding.linear_1.in_features
+
+        if expected_add_embed_dim != passed_add_embed_dim:
+            raise ValueError(
+                f"Model expects an added time embedding vector of length {expected_add_embed_dim}, but a vector of {passed_add_embed_dim} was created. The model has an incorrect config. Please check `unet.config.time_embedding_type` and `text_encoder_2.config.projection_dim`."
+            )
+
+        self.add_time_ids = torch.tensor([add_time_ids], dtype=self.prompt_embeds.dtype).to(device)
+
 
     @torch.no_grad()
     def single_infer(
         self,
-        rgb_in: Union[torch.Tensor, None],
         field_in: torch.Tensor,
         num_inference_steps: int,
         generator: Union[torch.Generator, None],
@@ -494,48 +471,25 @@ class MarigoldPipelineSDXL(
             `torch.Tensor`: Predicted depth map.
         """
         device = self.device
-        rgb_in = rgb_in.to(device)
-        if field_in != None:
-            # logging.info("Output image is conditioned on field map!")
-            field_in = field_in.to(device)
+        batch_size = field_in.shape[0]
 
-        # Set timesteps
+        # Set time steps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
-        timesteps = self.scheduler.timesteps  # [T]
+        timesteps = self.scheduler.timesteps
 
-        # Encode image
-        rgb_in = None
-        if rgb_in != None:
-            rgb_latent = self.encode_rgb(rgb_in) # [B, 4, h, w] 
-        else: 
-            rgb_latent = torch.randn(
-                [1, 4, 32, 32],
-                device=device,
-                dtype=self.dtype,
-                generator=generator,
-                ) * self.rgb_latent_scale_factor
+        #prepare latents
+        latents = torch.randn(field_latent.shape, generator=generator, device=device, dtype=prompt_embeds.dtype)
+        # scale the initial noise by the standard deviation required by the scheduler
+        latents = latents * self.scheduler.init_noise_sigma
 
-        # latent_visualized = self.plot_latent(rgb_latent, "image") # replace name to "field" if plotting field latent
 
-        # Initial depth map        
-        # if field_in != None:
+        # field latent 
         field_latent = self.encode_field(field_in)
-        # else:
-            # field_latent = torch.randn(
-            #     rgb_latent.shape,
-            #     device=device,
-            #     dtype=self.dtype,
-            #     generator=generator,
-            # )  # [B, 4, h, w]
 
-        # Batched empty text embedding
-        if self.empty_text_embed is None:
-            self.encode_empty_text()
-        batch_empty_text_embed = self.empty_text_embed.repeat(
-            (rgb_latent.shape[0], 1, 1)
-        ).to(device)  # [B, 2, 1024]
+        if self.prompt_embeds is None:
+            self.encode_prompt()
+            self.get_time_ids()
 
-        # Denoising loop
         if show_pbar:
             iterable = tqdm(
                 enumerate(timesteps),
@@ -547,93 +501,34 @@ class MarigoldPipelineSDXL(
             iterable = enumerate(timesteps)
 
         for i, t in iterable:
-            unet_input = torch.cat([field_latent, rgb_latent], dim=1)  # this order is important [B, 8, h, w]
-            # unet_input = field_latent
+            # expand the latents if we are doing classifier free guidance
+            latent_model_input = torch.cat([field_latent, latents], dim=1)
+            latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
             # predict the noise residual
-            noise_pred = self.unet(
-                unet_input, t, encoder_hidden_states=batch_empty_text_embed
-            ).sample  # [B, 4, h, w]
+            added_cond_kwargs = {"text_embeds": self.add_text_embeds, "time_ids": self.add_time_ids}
+            noise_pred = unet(
+                latent_model_input,
+                t,
+                encoder_hidden_states= self.prompt_embeds,
+                cross_attention_kwargs= None,
+                added_cond_kwargs=added_cond_kwargs,
+                return_dict=False,
+            )[0]
 
             # compute the previous noisy sample x_t -> x_t-1
-            rgb_latent = self.scheduler.step(
-                noise_pred, t, rgb_latent, generator=generator
-            ).prev_sample
+            latents_dtype = latents.dtype
+            latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+            if latents.dtype != latents_dtype:
+                if torch.backends.mps.is_available():
+                    # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
+                    latents = latents.to(latents_dtype)
 
-        # print("field latent", field_latent.shape)
-        # visual_latent_field = self.plot_latent(field_latent, "field")
-        # logging.info("Field latent image saved!")
+        image = self.decode_rgb(latents)
 
-        # field = self.decode_field(field_latent)
-        rgb_out = self.decode_rgb(rgb_latent) # [B, 3, h, w]
-        # visual_latent_field = self.plot_image(rgb_out, "image")
+        return image
 
-        # # clip prediction
-        # field = torch.clip(field, -1.0, 1.0)
-        # # shift to [0, 1]
-        # field = (field + 1.0) / 2.0
 
-        return rgb_out
-
-    def plot_latent(self, rgb_latent, name):
-        """
-        Args:
-            rgb_latent: Input rgb latent. (B, 4, h, w)
-        """
-        # Remove the batch dimension (since it's 1)
-        rgb_latent = rgb_latent.squeeze(0)  # Shape becomes (4, h, w)
-
-        # Number of channels
-        num_channels = rgb_latent.shape[0]
-
-        # Plotting and saving the images
-        for i in range(num_channels):
-            # Create an image by picking every 3 channels
-            # Roll the tensor to get different combinations of 3 channels
-            image = torch.roll(rgb_latent, shifts=i, dims=0)[:3, :, :]
-            
-            # Convert the tensor to numpy and transpose to (H, W, C)
-            image_np = image.permute(1, 2, 0).cpu().numpy()
-            
-            # Normalize the image to [0, 1] for saving
-            image_np = (image_np - image_np.min()) / (image_np.max() - image_np.min())
-            
-            # Convert to uint8 format (0-255) for saving as an image
-            image_np = (image_np * 255).astype(np.uint8)
-            
-            # Save the image as a PNG file
-            image_pil = Image.fromarray(image_np)
-            image_pil.save(f'/share/data/p2p/yz5880/Marigold/output/plot_latent/{name}_combination_{i+1}.png')
-
-            logging.info(f"Saved {name}_combination_{i+1}.png")
-
-    def plot_image(self, rgb_image, name):
-        """
-        Args:
-            rgb_latent: Input rgb latent. (B, 3, h, w)
-        """
-        # Remove the batch dimension (since it's 1)
-        rgb_image = rgb_image.squeeze(0)  # Shape becomes (3, h, w)
-
-        # Number of channels
-        num_channels = rgb_image.shape[0]
-
-        # Plotting and saving the images
-        
-        # Convert the tensor to numpy and transpose to (H, W, C)
-        image_np = rgb_image.permute(1, 2, 0).cpu().numpy()
-        
-        # Normalize the image to [0, 1] for saving
-        image_np = (image_np - image_np.min()) / (image_np.max() - image_np.min())
-        
-        # Convert to uint8 format (0-255) for saving as an image
-        image_np = (image_np * 255).astype(np.uint8)
-        
-        # Save the image as a PNG file
-        image_pil = Image.fromarray(image_np)
-        image_pil.save(f'/share/data/p2p/yz5880/Marigold/output/plot_latent/{name}_prediction.png')
-
-        logging.info(f"Saved {name}_prediction.png")
 
     def encode_rgb(self, rgb_in: torch.Tensor) -> torch.Tensor:
         """
@@ -646,49 +541,39 @@ class MarigoldPipelineSDXL(
         Returns:
             `torch.Tensor`: Image latent.
         """
-        # encode
-        h = self.vae.encoder(rgb_in)
-        moments = self.vae.quant_conv(h)
-        mean, logvar = torch.chunk(moments, 2, dim=1)
-        # scale latent
-        rgb_latent = mean * self.rgb_latent_scale_factor
-        # resize for field latent
-        rgb_latent_resized = torch.nn.functional.interpolate(rgb_latent, size=(32, 32), mode='bilinear', align_corners=False)
-        return rgb_latent_resized
+        latent = self.vae.encode(rgb_in).latent_dist.sample()
+        latent = latent * self.vae.config.scaling_factor
+
+        latent = latent.to(self.device)
+
+        return latent
 
 
     def encode_field(self, field_in: torch.Tensor) -> torch.Tensor:
-        # encode
-        h = self.vae.encoder(field_in)
-        moments = self.vae.quant_conv(h)
-        mean, logvar = torch.chunk(moments, 2, dim=1)
-        # scale latent
-        field_latent = mean * self.rgb_latent_scale_factor
-        return field_latent
-
+        latent = self.vae.encode(field_in).latent_dist.sample()
+        latent = latent * self.vae.config.scaling_factor
     
-    def decode_field(self, field_latent: torch.Tensor) -> torch.Tensor:
-        """
-        Decode field latent into field map.
+        latent = latent.to(self.device)
 
-        Args:
-            field_latent (`torch.Tensor`):
-                Field latent to be decoded.
+        return latent
 
-        Returns:
-            `torch.Tensor`: Decoded depth map.
-        """
-        # scale latent
-        field_latent = field_latent / self.rgb_latent_scale_factor
-        # decode
-        z = self.vae.post_quant_conv(field_latent)
-        field = self.vae.decoder(z)
 
-        return field
+    def decode_rgb(self, latents: torch.Tensor) -> torch.Tensor:
+        # unscale/denormalize the latents
+        # denormalize with the mean and std if available and not None
+        has_latents_mean = hasattr(self.vae.config, "latents_mean") and self.vae.config.latents_mean is not None
+        has_latents_std = hasattr(self.vae.config, "latents_std") and self.vae.config.latents_std is not None
+        if has_latents_mean and has_latents_std:
+            latents_mean = (
+                torch.tensor(self.vae.config.latents_mean).view(1, 4, 1, 1).to(latents.device, latents.dtype)
+            )
+            latents_std = (
+                torch.tensor(self.vae.config.latents_std).view(1, 4, 1, 1).to(latents.device, latents.dtype)
+            )
+            latents = latents * latents_std / self.vae.config.scaling_factor + latents_mean
+        else:
+            latents = latents / self.vae.config.scaling_factor
 
-    def decode_rgb(self, rgb_latent: torch.Tensor) -> torch.Tensor:
-        rgb_latent = rgb_latent / self.rgb_latent_scale_factor
-        z = self.vae.post_quant_conv(rgb_latent)
-        image = self.vae.decoder(z)
+        image = vae.decode(latents, return_dict=False)[0]
 
         return image
