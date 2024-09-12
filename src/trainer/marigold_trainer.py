@@ -263,9 +263,12 @@ class MarigoldTrainer:
                     field_latent = self.model.encode_field(field)  # [B, 4, h, w]
 
                 # Sample a random timestep for each image
+                
+                # we only train on late stages of diffusion
+                upper_timestep = int(0.2 * self.scheduler_timesteps)
                 timesteps = torch.randint(
                     0,
-                    self.scheduler_timesteps,
+                    upper_timestep,
                     (batch_size,),
                     device=device,
                     generator=rand_num_generator,
@@ -306,6 +309,7 @@ class MarigoldTrainer:
                     [field_latent, noisy_latents], dim=1
                 )  # [B, 8, h, w]
                 cat_latents = cat_latents.float()
+                cat_latents =  self.model.scheduler.scale_model_input(cat_latents, timesteps)
 
                 # Predict the noise residual
                 model_pred = self.model.unet(

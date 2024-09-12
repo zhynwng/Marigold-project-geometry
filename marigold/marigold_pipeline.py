@@ -30,6 +30,7 @@ from diffusers import (
     DiffusionPipeline,
     LCMScheduler,
     UNet2DConditionModel,
+    LMSDiscreteScheduler
 )
 from diffusers.utils import BaseOutput
 from PIL import Image
@@ -115,7 +116,7 @@ class MarigoldPipeline(DiffusionPipeline):
         self,
         unet: UNet2DConditionModel,
         vae: AutoencoderKL,
-        scheduler: Union[DDIMScheduler, LCMScheduler],
+        scheduler: Union[LMSDiscreteScheduler],
         text_encoder: CLIPTextModel,
         tokenizer: CLIPTokenizer,
         scale_invariant: Optional[bool] = True,
@@ -303,21 +304,18 @@ class MarigoldPipeline(DiffusionPipeline):
                 logging.warning(
                     f"Non-optimal setting of denoising steps: {n_step}. Recommended setting is 1-4 steps."
                 )
-        else:
-            raise RuntimeError(f"Unsupported scheduler type: {type(self.scheduler)}")
 
     def encode_empty_text(self):
         """
         Encode text embedding for empty prompt
         """
-        prompt = ""
-        text_inputs = self.tokenizer(
-            prompt,
-            padding="do_not_pad",
-            max_length=self.tokenizer.model_max_length,
-            truncation=True,
-            return_tensors="pt",
-        )
+        prompt = "a realistic photo of an indoor room"
+        text_inputs = self.tokenizer(prompt, 
+            padding="max_length", 
+            max_length= self.tokenizer.model_max_length, 
+            truncation=True, 
+            return_tensors="pt")
+
         text_input_ids = text_inputs.input_ids.to(self.text_encoder.device)
         self.empty_text_embed = self.text_encoder(text_input_ids)[0].to(self.dtype)
 
@@ -344,6 +342,8 @@ class MarigoldPipeline(DiffusionPipeline):
         Returns:
             `torch.Tensor`: Predicted depth map.
         """
+
+        guidance_scale = 7.5
         device = self.device
         field_in = field_in.to(device)
 
@@ -351,7 +351,7 @@ class MarigoldPipeline(DiffusionPipeline):
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps  # [T]
 
-        # Encode image
+        # Encode field
         field_latent = self.encode_field(field_in) #flag
 
         # Initial image latent (noise)
@@ -369,6 +369,15 @@ class MarigoldPipeline(DiffusionPipeline):
             (rgb_latent.shape[0], 1, 1)
         ).to(device)  # [B, 2, 1024]
 
+
+        # guidance embedding
+        uncond_input = self.tokenizer(
+            [""] * rgb_latent.shape[0], padding="max_length", max_length=self.tokenizer.model_max_length, return_tensors="pt"
+        )
+        with torch.no_grad():
+            uncond_embeddings = self.text_encoder(uncond_input.input_ids.to(device))[0]  
+        text_embeddings = torch.cat([uncond_embeddings, batch_empty_text_embed])
+
         # Denoising loop
         if show_pbar:
             iterable = tqdm(
@@ -380,19 +389,29 @@ class MarigoldPipeline(DiffusionPipeline):
         else:
             iterable = enumerate(timesteps)
 
+        rgb_latent = rgb_latent * self.scheduler.init_noise_sigma
+
         for i, t in iterable:            
             unet_input = torch.cat(
                 [field_latent, rgb_latent], dim=1
             )  # this order is important
 
+            # guidance
+            unet_input = torch.cat([unet_input] * 2)
+            unet_input =  self.scheduler.scale_model_input(unet_input, t)
+
             # predict the noise residual
             noise_pred = self.unet(
-                unet_input, t, encoder_hidden_states=batch_empty_text_embed
+                unet_input, t, encoder_hidden_states=text_embeddings
             ).sample  # [B, 4, h, w]
+
+            # perform guidance
+            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
             # compute the previous noisy sample x_t -> x_t-1
             rgb_latent = self.scheduler.step(
-                noise_pred, t, rgb_latent, generator=generator
+                noise_pred, t, rgb_latent
             ).prev_sample
             
 
@@ -423,12 +442,12 @@ class MarigoldPipeline(DiffusionPipeline):
 
     def decode_rgb(self, rgb_latent: torch.Tensor) -> torch.Tensor:
 
-        rgb_latent = rgb_latent / self.rgb_latent_scale_factor
+        rgb_latent = 1 / self.rgb_latent_scale_factor * rgb_latent
         # decode
         z = self.vae.post_quant_conv(rgb_latent)
-        field = self.vae.decoder(z)
+        rgb = self.vae.decoder(z)
 
-        return field
+        return rgb
 
     def encode_field(self, field_in: torch.Tensor) -> torch.Tensor:
         # encode
