@@ -425,8 +425,8 @@ class SDXLPipeline(
         '''
 
         device = self.device
-        original_size = (256, 256)
-        target_size = (256, 256)
+        original_size = (1024, 1024)
+        target_size = (1024, 1024)
         crops_coords_top_left = (0, 0)
 
         self.add_text_embeds = self.pooled_prompt_embeds.to(device)
@@ -473,18 +473,18 @@ class SDXLPipeline(
         device = self.device
         batch_size = field_in.shape[0]
 
+        # encode field 
+        field_latent = self.encode_field(field_in)
+
+
         # Set time steps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps
-
         #prepare latents
-        latents = torch.randn(field_latent.shape, generator=generator, device=device, dtype=prompt_embeds.dtype)
+        latents = torch.randn(field_latent.shape, generator=generator, device=device, dtype=self.prompt_embeds.dtype)
         # scale the initial noise by the standard deviation required by the scheduler
         latents = latents * self.scheduler.init_noise_sigma
 
-
-        # field latent 
-        field_latent = self.encode_field(field_in)
 
         if self.prompt_embeds is None:
             self.encode_prompt()
@@ -500,6 +500,11 @@ class SDXLPipeline(
         else:
             iterable = enumerate(timesteps)
 
+        self.add_text_embeds = self.add_text_embeds.to(device)
+        self.add_time_ids = self.add_time_ids.to(device)
+        self.prompt_embeds = self.prompt_embeds.to(device)
+
+
         for i, t in iterable:
             # expand the latents if we are doing classifier free guidance
             latent_model_input = torch.cat([field_latent, latents], dim=1)
@@ -507,7 +512,9 @@ class SDXLPipeline(
 
             # predict the noise residual
             added_cond_kwargs = {"text_embeds": self.add_text_embeds, "time_ids": self.add_time_ids}
-            noise_pred = unet(
+
+
+            noise_pred = self.unet(
                 latent_model_input,
                 t,
                 encoder_hidden_states= self.prompt_embeds,
@@ -574,6 +581,6 @@ class SDXLPipeline(
         else:
             latents = latents / self.vae.config.scaling_factor
 
-        image = vae.decode(latents, return_dict=False)[0]
+        image = self.vae.decode(latents, return_dict=False)[0]
 
         return image

@@ -97,10 +97,7 @@ class SDXLTrainer:
         self.model.vae.requires_grad_(False)
         self.model.text_encoder.requires_grad_(False)
         self.model.text_encoder_2.requires_grad_(False)
-        self.model.unet.requires_grad_(False)
-
-        for params in self.model.unet.conv_in.parameters():
-            params.requires_grad_(True)
+        self.model.unet.requires_grad_(True)
         
         # Optimizer !should be defined after input layer is adapted
         lr = self.cfg.lr
@@ -198,7 +195,7 @@ class SDXLTrainer:
         _weight = self.model.unet.conv_in.weight.clone()  # [320, 4, 3, 3]
         _bias = self.model.unet.conv_in.bias.clone()  # [320]
         _weight_add = torch.zeros((320, 4, 3, 3))
-        _weight = torch.cat((_weight, _weight_add), 1) # [320, 8, 3, 3]
+        _weight = torch.cat((_weight_add, _weight), 1) # [320, 8, 3, 3]
         # new conv_in channel
         _n_convin_out_channel = self.model.unet.conv_in.out_channels
         _new_conv_in = Conv2d(
@@ -247,6 +244,8 @@ class SDXLTrainer:
 
         self.train_metrics.reset()
         accumulated_step = 0
+
+        self.visualize()
 
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
