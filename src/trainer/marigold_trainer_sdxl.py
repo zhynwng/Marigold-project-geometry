@@ -102,6 +102,9 @@ class SDXLTrainer:
         for params in self.model.unet.conv_in.parameters():
             params.requires_grad_(True)
 
+        for params in self.model.unet.conv_in.parameters():
+            params.requires_grad_(True)
+        
         # Optimizer !should be defined after input layer is adapted
         lr = self.cfg.lr
         self.optimizer = Adam(self.model.unet.parameters(), lr=lr)

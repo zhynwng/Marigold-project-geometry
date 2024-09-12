@@ -316,7 +316,7 @@ class SDXLPipeline(
         field_pred_ls = []
         if show_progress_bar:
             iterable = tqdm(
-                single_field_loader, desc=" " * 2 + "Inference batches", leave=False    
+                single_field_loader, desc=" " * 2 + "Inference batches", leave=False
             )
         else:
             iterable = single_field_loader
@@ -331,7 +331,6 @@ class SDXLPipeline(
             image_ls.append(image_pred.detach())
 
         image_preds = torch.concat(image_ls, dim=0)
-        # field_preds = torch.concat(field_pred_ls, dim=0)
         torch.cuda.empty_cache()  # clear vram cache for ensembling
 
         # ----------------- Test-time ensembling -----------------
@@ -419,7 +418,6 @@ class SDXLPipeline(
         self.pooled_prompt_embeds = pooled_prompt_embeds.to(device)
 
 
-
     @torch.no_grad()
     def get_time_ids(self):
         '''
@@ -448,6 +446,7 @@ class SDXLPipeline(
 
         self.add_time_ids = torch.tensor([add_time_ids], dtype=self.prompt_embeds.dtype).to(device)
 
+
     @torch.no_grad()
     def single_infer(
         self,
@@ -474,16 +473,13 @@ class SDXLPipeline(
         device = self.device
         batch_size = field_in.shape[0]
 
-        # Set timesteps
+        # Set time steps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
-        timesteps = self.scheduler.timesteps
         timesteps = self.scheduler.timesteps  # [T]
 
         # field latent 
         field_latent = self.encode_field(field_in)
 
-        # print("prompt embeds", self.prompt_embeds)
-        # sys.exit()
         if self.prompt_embeds is None:
             self.encode_prompt()
             self.get_time_ids()
@@ -554,7 +550,7 @@ class SDXLPipeline(
 
         return latent
 
-
+      
     def encode_field(self, field_in: torch.Tensor) -> torch.Tensor:
         latent = self.vae.encode(field_in).latent_dist.sample()
         latent = latent * self.vae.config.scaling_factor
@@ -562,7 +558,6 @@ class SDXLPipeline(
         latent = latent.to(self.device)
 
         return latent
-
 
     def decode_rgb(self, latents: torch.Tensor) -> torch.Tensor:
         # unscale/denormalize the latents
