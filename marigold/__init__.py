@@ -20,3 +20,4 @@
 
 from .marigold_pipeline import MarigoldPipeline, MarigoldOutput  # noqa: F401
 from .finetune_pipeline import FinetunePipeline, FinetuneOutput
+from .marigold_pipeline_SDXL import SDXLPipeline, SDXLOutput

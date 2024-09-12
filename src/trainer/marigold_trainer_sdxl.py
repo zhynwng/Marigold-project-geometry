@@ -42,7 +42,7 @@ from tqdm import tqdm
 from PIL import Image
 
 from marigold.marigold_pipeline import MarigoldPipeline, MarigoldOutput
-from marigold.marigold_pipeline_sdxl import MarigoldPipelineSDXL, MarigoldOutput
+from marigold.marigold_pipeline_SDXL import SDXLPipeline, SDXLOutput
 from src.util import metric
 from src.util.data_loader import skip_first_batches
 from src.util.logging_util import tb_logger, eval_dic_to_text
@@ -54,11 +54,11 @@ from src.util.alignment import align_depth_least_square
 from src.util.seeding import generate_seed_sequence
 
 
-class MarigoldTrainerImageSDXL:
+class SDXLTrainer:
     def __init__(
         self,
         cfg: OmegaConf,
-        model: MarigoldPipelineSDXL,
+        model: SDXLPipeline,
         train_dataloader: DataLoader,
         device,
         base_ckpt_dir,
@@ -88,15 +88,19 @@ class MarigoldTrainerImageSDXL:
             self._replace_unet_conv_in_zero_intialization()
 
         # Encode empty text prompt
-        self.model.encode_empty_text()
-        self.empty_text_embed = self.model.empty_text_embed.detach().clone().to(device)
+        self.model.encode_prompt()
+        self.model.get_time_ids()
 
         self.model.unet.enable_xformers_memory_efficient_attention()
 
         # Trainability
         self.model.vae.requires_grad_(False)
         self.model.text_encoder.requires_grad_(False)
-        self.model.unet.requires_grad_(True)
+        self.model.text_encoder_2.requires_grad_(False)
+        self.model.unet.requires_grad_(False)
+
+        for params in self.model.unet.conv_in.parameters():
+            params.requires_grad_(True)
 
         # Optimizer !should be defined after input layer is adapted
         lr = self.cfg.lr
@@ -233,7 +237,6 @@ class MarigoldTrainerImageSDXL:
         logging.info("Start training to predict Image using Marigold")
 
         device = self.device
-        self.model.to(device)
 
         if self.in_evaluation:
             logging.info(
@@ -243,6 +246,9 @@ class MarigoldTrainerImageSDXL:
 
         self.train_metrics.reset()
         accumulated_step = 0
+
+        logging.info("Visualize before training!")
+        self.visualize()
 
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
@@ -314,93 +320,23 @@ class MarigoldTrainerImageSDXL:
                 )  # [B, 4, h, w]
 
                 # Text embedding
-                text_embed = self.empty_text_embed.to(device).repeat(
+                text_embed = self.model.prompt_embeds.to(device).repeat(
                     (batch_size, 1, 1)
                 )  # [B, 77, 1024]
 
+                added_cond_kwargs = {"text_embeds": self.model.add_text_embeds.to(device), "time_ids": self.model.add_time_ids.to(device)}
+
                 # Concat field and rgb latents
                 cat_latents = torch.cat(
-                    [noisy_latents, field_latent], dim=1
+                    [field_latent, noisy_latents], dim=1
                 )  # [B, 8, h, w]
-                cat_latents = cat_latents.float()           
-
-                # add text embeds
-                height = 1024
-                width = 1024
-                crops_coords_top_left = (0, 0)
-                original_size = (height, width)
-                target_size = (height, width)
-                num_images_per_prompt = 1
-
-                prompt = ""
-                prompt = [prompt] if isinstance(prompt, str) else prompt
-
-                # Define tokenizers and text encoders
-                tokenizers = [self.model.tokenizer, self.model.tokenizer_2]
-                text_encoders = (
-                    [self.model.text_encoder, self.model.text_encoder_2]
-                )
-
-                prompt_2 = prompt
-                prompt_2 = [prompt_2] if isinstance(prompt_2, str) else prompt_2
-
-                # textual inversion: process multi-vector tokens if necessary
-                prompt_embeds_list = []
-                prompts = [prompt, prompt_2]
-                for prompt, tokenizer, text_encoder in zip(prompts, tokenizers, text_encoders):
-                    text_inputs = tokenizer(
-                        prompt,
-                        padding="max_length",
-                        max_length=tokenizer.model_max_length,
-                        truncation=True,
-                        return_tensors="pt",
-                    )
-
-                    text_input_ids = text_inputs.input_ids
-                    untruncated_ids = tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
-
-                    if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(
-                        text_input_ids, untruncated_ids
-                    ):
-                        removed_text = tokenizer.batch_decode(untruncated_ids[:, tokenizer.model_max_length - 1 : -1])
-
-                    prompt_embeds = text_encoder(text_input_ids.to(device), output_hidden_states=True)
-
-                    # We are only ALWAYS interested in the pooled output of the final text encoder
-                    pooled_prompt_embeds = prompt_embeds[0][0, :1]
-
-                    prompt_embeds = prompt_embeds.hidden_states[-2]
-
-                    prompt_embeds_list.append(prompt_embeds)
-
-                prompt_embeds = torch.concat(prompt_embeds_list, dim=-1)
-
-
-                if  self.model.text_encoder_2 is not None:
-                    prompt_embeds = prompt_embeds.to(dtype=self.model.text_encoder_2.dtype, device=device)
-
-                bs_embed, seq_len, _ = prompt_embeds.shape
-                # duplicate text embeddings for each generation per prompt, using mps friendly method
-                prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-                prompt_embeds = prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
-
-                pooled_prompt_embeds = pooled_prompt_embeds.repeat(1, num_images_per_prompt).view(
-                    bs_embed * num_images_per_prompt, -1
-                )
-
-                pooled_prompt_embeds = pooled_prompt_embeds.to(device)
-                add_text_embeds = pooled_prompt_embeds
-
-                # add time ids
-                add_time_ids = list(original_size + crops_coords_top_left + target_size)
-                add_time_ids = torch.tensor([add_time_ids], dtype=prompt_embeds.dtype).to(device)  
-
-                added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
+                cat_latents = cat_latents.float().to(device)       
 
                 # Predict the noise residual
                 model_pred = self.model.unet(
-                    cat_latents, timesteps, text_embed, added_cond_kwargs=added_cond_kwargs,
-                ).sample  # [B, 4, h, w]
+                    cat_latents, timesteps, text_embed, added_cond_kwargs=added_cond_kwargs,return_dict=False,
+                )[0]  # [B, 4, h, w]
+
                 if torch.isnan(model_pred).any():
                     logging.warning("model_pred contains NaN.")
 
@@ -607,7 +543,7 @@ class MarigoldTrainerImageSDXL:
             # assert 1 == data_loader.batch_size
             # Read input field
             # print(batch)
-            rgb_int = batch["image"].to(self.device).to(torch.float32)[:1]
+            rgb_in = batch["image"].to(self.device).to(torch.float32)[:1]
             field_in = batch["field"].to(self.device).to(torch.float32)[:1]
             # [1, 3, H, W]
 
@@ -621,7 +557,7 @@ class MarigoldTrainerImageSDXL:
 
             # Predict image
             pipe_out: MarigoldOutput = self.model(
-                rgb_int,
+                # rgb_int,
                 field_in,
                 denoising_steps=self.cfg.validation.denoising_steps,
                 ensemble_size=self.cfg.validation.ensemble_size,
