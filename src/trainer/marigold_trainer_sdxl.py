@@ -101,6 +101,9 @@ class SDXLTrainer:
 
         for params in self.model.unet.conv_in.parameters():
             params.requires_grad_(True)
+
+        for params in self.model.unet.conv_in.parameters():
+            params.requires_grad_(True)
         
         # Optimizer !should be defined after input layer is adapted
         lr = self.cfg.lr
@@ -237,7 +240,6 @@ class SDXLTrainer:
         logging.info("Start training to predict Image using Marigold")
 
         device = self.device
-        self.model.to(device)
 
         if self.in_evaluation:
             logging.info(
@@ -247,6 +249,9 @@ class SDXLTrainer:
 
         self.train_metrics.reset()
         accumulated_step = 0
+
+        logging.info("Visualize before training!")
+        self.visualize()
 
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
@@ -328,12 +333,11 @@ class SDXLTrainer:
                 cat_latents = torch.cat(
                     [field_latent, noisy_latents], dim=1
                 )  # [B, 8, h, w]
-                cat_latents = cat_latents.float().to(device)     
+                cat_latents = cat_latents.float().to(device)       
 
                 # Predict the noise residual
                 model_pred = self.model.unet(
                     cat_latents, timesteps, text_embed, added_cond_kwargs=added_cond_kwargs,return_dict=False,
-
                 )[0]  # [B, 4, h, w]
 
                 if torch.isnan(model_pred).any():
@@ -556,6 +560,7 @@ class SDXLTrainer:
 
             # Predict image
             pipe_out: MarigoldOutput = self.model(
+                # rgb_int,
                 field_in,
                 denoising_steps=self.cfg.validation.denoising_steps,
                 ensemble_size=self.cfg.validation.ensemble_size,

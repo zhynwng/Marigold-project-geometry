@@ -178,7 +178,7 @@ class BaseDepthDataset(Dataset):
         else:
             image_to_read = os.path.join(self.dataset_dir, img_rel_path)
         if image_to_read.endswith('.pt'):
-            field = torch.load(image_to_read)
+            field = torch.load(image_to_read, map_location='cpu')
             # print("gravity shape:", field['pred_gravity_original'].shape)
             # print("latitude shape:", field['pred_latitude_original'].shape)
             latitude_map = field['pred_latitude_original']

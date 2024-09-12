@@ -24,6 +24,7 @@ from typing import Dict, Optional, Union
 
 import numpy as np
 import torch
+import sys
 from diffusers import (
     AutoencoderKL,
     EulerDiscreteScheduler,
@@ -351,7 +352,6 @@ class SDXLPipeline(
             field_visualized = Image.fromarray(field_visualized),
         )
 
-
     @torch.no_grad()
     def encode_prompt(self):
         """
@@ -414,8 +414,8 @@ class SDXLPipeline(
         )
 
         self.prompt_embeds = prompt_embeds
+        self.prompt_embeds = self.prompt_embeds.to(device)
         self.pooled_prompt_embeds = pooled_prompt_embeds.to(device)
-
 
 
     @torch.no_grad()
@@ -475,13 +475,7 @@ class SDXLPipeline(
 
         # Set time steps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
-        timesteps = self.scheduler.timesteps
-
-        #prepare latents
-        latents = torch.randn(field_latent.shape, generator=generator, device=device, dtype=prompt_embeds.dtype)
-        # scale the initial noise by the standard deviation required by the scheduler
-        latents = latents * self.scheduler.init_noise_sigma
-
+        timesteps = self.scheduler.timesteps  # [T]
 
         # field latent 
         field_latent = self.encode_field(field_in)
@@ -489,6 +483,11 @@ class SDXLPipeline(
         if self.prompt_embeds is None:
             self.encode_prompt()
             self.get_time_ids()
+
+        #prepare latents
+        latents = torch.randn(field_latent.shape, generator=generator, device=device, dtype=self.prompt_embeds.dtype)
+        # scale the initial noise by the standard deviation required by the scheduler
+        latents = latents * self.scheduler.init_noise_sigma
 
         if show_pbar:
             iterable = tqdm(
@@ -506,8 +505,11 @@ class SDXLPipeline(
             latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
             # predict the noise residual
+            self.add_text_embeds = self.add_text_embeds.to(device)
+            self.add_time_ids = self.add_time_ids.to(device)
             added_cond_kwargs = {"text_embeds": self.add_text_embeds, "time_ids": self.add_time_ids}
-            noise_pred = unet(
+            self.prompt_embeds = self.prompt_embeds.to(device)
+            noise_pred = self.unet(
                 latent_model_input,
                 t,
                 encoder_hidden_states= self.prompt_embeds,
@@ -548,15 +550,14 @@ class SDXLPipeline(
 
         return latent
 
-
+      
     def encode_field(self, field_in: torch.Tensor) -> torch.Tensor:
         latent = self.vae.encode(field_in).latent_dist.sample()
         latent = latent * self.vae.config.scaling_factor
-    
+
         latent = latent.to(self.device)
 
         return latent
-
 
     def decode_rgb(self, latents: torch.Tensor) -> torch.Tensor:
         # unscale/denormalize the latents
@@ -574,6 +575,6 @@ class SDXLPipeline(
         else:
             latents = latents / self.vae.config.scaling_factor
 
-        image = vae.decode(latents, return_dict=False)[0]
+        image = self.vae.decode(latents, return_dict=False)[0]
 
-        return image
+        return image    
