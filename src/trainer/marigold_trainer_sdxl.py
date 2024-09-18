@@ -97,7 +97,10 @@ class SDXLTrainer:
         self.model.vae.requires_grad_(False)
         self.model.text_encoder.requires_grad_(False)
         self.model.text_encoder_2.requires_grad_(False)
-        self.model.unet.requires_grad_(True)
+        self.model.unet.requires_grad_(False)
+
+        for params in self.model.unet.conv_in.parameters():
+            params.requires_grad_(True)
         
         # Optimizer !should be defined after input layer is adapted
         lr = self.cfg.lr
@@ -283,9 +286,10 @@ class SDXLTrainer:
                     field_latent = self.model.encode_field(field)  # [B, 4, h, w]
 
                 # Sample a random timestep for each image
+                upper_timestep = int(0.8 * self.scheduler_timesteps)
                 timesteps = torch.randint(
                     0,
-                    self.scheduler_timesteps,
+                    upper_timestep, # self.scheduler_timesteps,
                     (batch_size,),
                     device=device,
                     generator=rand_num_generator,
