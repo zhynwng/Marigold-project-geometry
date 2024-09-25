@@ -35,6 +35,7 @@ from tqdm import tqdm
 from marigold.finetune_pipeline import FinetunePipeline
 from marigold.marigold_pipeline import MarigoldPipeline
 from marigold.marigold_pipeline_SDXL import SDXLPipeline
+from marigold.marigold_pipeline_IF import DFIFPipeline
 
 from src.dataset import BaseDepthDataset, DatasetMode, get_dataset
 from src.dataset.mixed_sampler import MixedBatchSampler
@@ -327,7 +328,7 @@ if "__main__" == __name__:
 
     # -------------------- Model --------------------
     _pipeline_kwargs = cfg.pipeline.kwargs if cfg.pipeline.kwargs is not None else {}
-    model = SDXLPipeline.from_pretrained(
+    model = DFIFPipeline.from_pretrained(
         os.path.join(base_ckpt_dir, cfg.model.pretrained_path), **_pipeline_kwargs, addition_embed_type = None, #variant=variant, torch_dtype=dtype, use_safetensors=True
     )
 

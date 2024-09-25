@@ -5,6 +5,7 @@ from .marigold_trainer import MarigoldTrainer
 from .finetune_trainer import FinetuneTrainer
 from .marigold_trainer_predict_image import MarigoldTrainerImage
 from .marigold_trainer_sdxl import SDXLTrainer
+from .marigold_trainer_IF import DFIFTrainer
 
 
 trainer_cls_name_dict = {
@@ -12,6 +13,7 @@ trainer_cls_name_dict = {
     "FinetuneTrainer": FinetuneTrainer,
     "MarigoldTrainerImage": MarigoldTrainerImage,
     "SDXLTrainer": SDXLTrainer,
+    "DFIFTrainer": DFIFTrainer,
 }
 
 
