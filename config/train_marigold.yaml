@@ -8,7 +8,7 @@ base_config:
 
 
 pipeline:
-  name: MarigoldPipeline
+  name: MarigoldPipelineSDXL
   kwargs:
     scale_invariant: true
     shift_invariant: true
@@ -25,13 +25,13 @@ augmentation:
 
 dataloader:
   num_workers: 2
-  effective_batch_size: 32
-  max_train_batch_size: 32
+  effective_batch_size: 64
+  max_train_batch_size: 64
   seed: 2024  # to ensure continuity when resuming from checkpoint
 
 # Training settings
 trainer:
-  name: MarigoldTrainer
+  name: MarigoldTrainerImageSDXL
   training_noise_scheduler:
     pretrained_path: miniSD
   init_seed: 2024  # use null to train w/o seeding

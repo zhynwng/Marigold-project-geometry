@@ -52,7 +52,7 @@ from src.util.alignment import align_depth_least_square
 from src.util.seeding import generate_seed_sequence
 
 
-class MarigoldTrainer:
+class MarigoldTrainerImage:
     def __init__(
         self,
         cfg: OmegaConf,
@@ -125,7 +125,7 @@ class MarigoldTrainer:
         ), "Different prediction types"
         self.scheduler_timesteps = (
             self.training_noise_scheduler.config.num_train_timesteps
-        )
+        ) # default is set to 1000
 
         # Eval metrics
         self.metric_funcs = [getattr(metric, _met) for _met in cfg.eval.eval_metrics]
@@ -184,21 +184,20 @@ class MarigoldTrainer:
         logging.info("Unet conv_in layer is replaced")
         # replace config
         self.model.unet.config["in_channels"] = 8
-        logging.info("Unet config is updated")
+        logging.info("Unet config is updated without zero convolution")
         return
 
     def _replace_unet_conv_in_zero_intialization(self):
         # replace the first layer to accept 8 in_channels
         _weight = self.model.unet.conv_in.weight.clone()  # [320, 4, 3, 3]
         _bias = self.model.unet.conv_in.bias.clone()  # [320]
-        _weight_add = torch.zeros(_weight.shape)
-        _weight = torch.cat((_weight_add, _weight), 1) # [320, 8, 3, 3]
+        _weight_add = torch.zeros((320, 4, 3, 3))
+        _weight = torch.cat((_weight, _weight_add), 1) # [320, 8, 3, 3]
         # new conv_in channel
         _n_convin_out_channel = self.model.unet.conv_in.out_channels
         _new_conv_in = Conv2d(
             8, _n_convin_out_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
         )
-
         _new_conv_in.weight = Parameter(_weight)
         _new_conv_in.bias = Parameter(_bias)
         self.model.unet.conv_in = _new_conv_in
@@ -208,9 +207,9 @@ class MarigoldTrainer:
         logging.info("Unet config is updated with zero initialization")
         return
 
-      
+
     def train(self, t_end=None):
-        logging.info("Start training")
+        logging.info("Start training to predict Image using Marigold")
 
         device = self.device
         self.model.to(device)
@@ -223,8 +222,6 @@ class MarigoldTrainer:
 
         self.train_metrics.reset()
         accumulated_step = 0
-
-        self.visualize()
 
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
@@ -262,12 +259,9 @@ class MarigoldTrainer:
                     field_latent = self.model.encode_field(field)  # [B, 4, h, w]
 
                 # Sample a random timestep for each image
-                
-                # we only train on late stages of diffusion
-                upper_timestep = int(0.2 * self.scheduler_timesteps)
                 timesteps = torch.randint(
                     0,
-                    upper_timestep,
+                    self.scheduler_timesteps,
                     (batch_size,),
                     device=device,
                     generator=rand_num_generator,
@@ -280,7 +274,7 @@ class MarigoldTrainer:
                         # calculate strength depending on t
                         strength = strength * (timesteps / self.scheduler_timesteps)
                     noise = multi_res_noise_like(
-                        rgb_latent,
+                        field_latent,
                         strength=strength,
                         downscale_strategy=self.mr_noise_downscale_strategy,
                         generator=rand_num_generator,
@@ -305,10 +299,9 @@ class MarigoldTrainer:
 
                 # Concat field and rgb latents
                 cat_latents = torch.cat(
-                    [field_latent, noisy_latents], dim=1
+                    [noisy_latents, field_latent], dim=1
                 )  # [B, 8, h, w]
                 cat_latents = cat_latents.float()
-                cat_latents =  self.model.scheduler.scale_model_input(cat_latents, timesteps)
 
                 # Predict the noise residual
                 model_pred = self.model.unet(
@@ -487,18 +480,15 @@ class MarigoldTrainer:
     '''
 
     def visualize(self):
-        for val_loader in self.vis_loaders:
-            vis_dataset_name = val_loader.dataset.disp_name
-            vis_out_dir = os.path.join(
-                self.out_dir_vis, self._get_backup_ckpt_name(), vis_dataset_name
-            )
-            os.makedirs(vis_out_dir, exist_ok=True)
-            _ = self.validate_single_dataset(
-                data_loader=val_loader,
-                metric_tracker=self.val_metrics,
-                save_to_dir=vis_out_dir,
-            )
-
+        vis_out_dir = os.path.join(
+            self.out_dir_vis, self._get_backup_ckpt_name()
+        )
+        os.makedirs(vis_out_dir, exist_ok=True)
+        _ = self.validate_single_dataset(
+            data_loader=self.train_loader,
+            metric_tracker=self.val_metrics,
+            save_to_dir=vis_out_dir,
+        )
 
 
     @torch.no_grad()
@@ -515,18 +505,16 @@ class MarigoldTrainer:
         val_init_seed = self.cfg.validation.init_seed
         val_seed_ls = generate_seed_sequence(val_init_seed, len(data_loader))
 
-        for i, batch in enumerate(
-            tqdm(data_loader, desc=f"evaluating on {data_loader.dataset.disp_name}"),
-            start=1,
-        ):
+        for i, batch in enumerate(data_loader):
 
             if i == 10:
                 break
             
-            assert 1 == data_loader.batch_size
+            # assert 1 == data_loader.batch_size
             # Read input field
-            field_in = batch["field"].to(self.device).to(torch.float32)
-            rgb_in = batch["image"].to(self.device).to(torch.float32)
+            # print(batch)
+            rgb_int = batch["image"].to(self.device).to(torch.float32)[:1]
+            field_in = batch["field"].to(self.device).to(torch.float32)[:1]
             # [1, 3, H, W]
 
             # Random number generator
@@ -537,8 +525,10 @@ class MarigoldTrainer:
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(seed)
 
-            # Predict depth
+
+            # Predict image
             pipe_out: MarigoldOutput = self.model(
+                rgb_int,
                 field_in,
                 denoising_steps=self.cfg.validation.denoising_steps,
                 ensemble_size=self.cfg.validation.ensemble_size,
@@ -554,7 +544,7 @@ class MarigoldTrainer:
             image_pred: Image.Image = pipe_out.image
             field_pred: np.ndarray = pipe_out.field
             vis_pred: Image.Image = pipe_out.field_visualized
-            
+
             if save_to_dir is not None:
                 output_dir_jpg = os.path.join(save_to_dir, "image")
                 output_dir_field = os.path.join(save_to_dir, "field")
@@ -571,8 +561,8 @@ class MarigoldTrainer:
                     logging.warning(f"Existing file: '{jpg_save_path}' will be overwritten")
                 image_pred.save(jpg_save_path)
 
-                # Save field
-                
+
+                # Save field                
                 field_save_path = os.path.join(output_dir_field, f"{pred_name_base}.pt")
                 if os.path.exists(field_save_path):
                     logging.warning(f"Existing file: '{field_save_path}' will be overwritten")
