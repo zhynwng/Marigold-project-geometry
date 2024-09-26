@@ -117,7 +117,8 @@ class MarigoldTrainer:
                 base_ckpt_dir,
                 cfg.trainer.training_noise_scheduler.pretrained_path,
                 "scheduler",
-            )
+            ),
+            timestep_spacing='trailing'
         )
         self.prediction_type = self.training_noise_scheduler.config.prediction_type
         assert (
@@ -265,10 +266,10 @@ class MarigoldTrainer:
                 # Sample a random timestep for each image
                 
                 # we only train on late stages of diffusion
-                upper_timestep = int(0.2 * self.scheduler_timesteps)
+                # upper_timestep = int(0.2 * self.scheduler_timesteps)
                 timesteps = torch.randint(
                     0,
-                    upper_timestep,
+                    self.scheduler_timesteps, # upper_timestep
                     (batch_size,),
                     device=device,
                     generator=rand_num_generator,
