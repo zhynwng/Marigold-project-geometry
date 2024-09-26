@@ -25,6 +25,7 @@
 import logging
 import os
 import shutil
+import cv2
 from datetime import datetime
 from typing import List, Union
 
@@ -51,6 +52,8 @@ from src.util.multi_res_noise import multi_res_noise_like
 from src.util.alignment import align_depth_least_square
 from src.util.seeding import generate_seed_sequence
 
+
+from perspective2d import PerspectiveFields
 
 
 class MarigoldTrainer:
@@ -111,6 +114,9 @@ class MarigoldTrainer:
 
         # Loss
         self.loss = get_loss(loss_name=self.cfg.loss.name, **self.cfg.loss.kwargs)
+        self.pf_loss = torch.nn.MSELoss()
+        self.pf_loss.requires_grad = True
+
 
         # Training noise scheduler
         self.training_noise_scheduler: DDPMScheduler = DDPMScheduler.from_pretrained(
@@ -166,6 +172,12 @@ class MarigoldTrainer:
         self.effective_iter = 0  # how many times optimizer.step() is called
         self.in_evaluation = False
         self.global_seed_sequence: List = []  # consistent global seed sequence, used to seed random generator, to ensure consistency when resuming
+
+
+        # Perspective Field extractor
+        version = 'PersNet-360Cities'
+        self.pf_model = PerspectiveFields(version).cuda()
+        self.pf_model.requires_grad_(False)
 
     def _replace_unet_conv_in(self):
         # replace the first layer to accept 8 in_channels
@@ -226,7 +238,6 @@ class MarigoldTrainer:
         self.train_metrics.reset()
         accumulated_step = 0
 
-        self.visualize()
 
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
@@ -246,58 +257,25 @@ class MarigoldTrainer:
 
                 # >>> With gradient accumulation >>>
 
-                # Get data
-                rgb = batch["image"].to(device).to(torch.float32)
+                # We just need the perspective field
                 field = batch["field"].to(device).to(torch.float32)
 
-                # normalize rgb 
-                rgb_norm: torch.Tensor = rgb / 255.0 * 2.0 - 1.0  #  [0, 255] -> [-1, 1]
-                rgb_norm = rgb_norm.float()
-                assert rgb_norm.min() >= -1.0 and rgb_norm.max() <= 1.0
 
-
-                batch_size = rgb.shape[0]
+                batch_size = field.shape[0]
                 with torch.no_grad():
-                    # Encode image
-                    rgb_latent = self.model.encode_rgb(rgb_norm)  # [B, 4, h, w]
                     # Encode field depth
                     field_latent = self.model.encode_field(field)  # [B, 4, h, w]
 
-                # Sample a random timestep for each image
-                
-                # we only train on late stages of diffusion
-                upper_timestep = int(0.2 * self.scheduler_timesteps)
-                timesteps = torch.randint(
-                    0,
-                    upper_timestep,
-                    (batch_size,),
-                    device=device,
-                    generator=rand_num_generator,
-                ).long()  # [B]
+                num_inference_steps = 2
+
+                self.model.scheduler.set_timesteps(num_inference_steps, device=device)
+                timesteps = self.model.scheduler.timesteps
 
                 # Sample noise
-                if self.apply_multi_res_noise:
-                    strength = self.mr_noise_strength
-                    if self.annealed_mr_noise:
-                        # calculate strength depending on t
-                        strength = strength * (timesteps / self.scheduler_timesteps)
-                    noise = multi_res_noise_like(
-                        rgb_latent,
-                        strength=strength,
-                        downscale_strategy=self.mr_noise_downscale_strategy,
-                        generator=rand_num_generator,
-                        device=device,
-                    )
-                else:
-                    noise = torch.randn(
-                        rgb_latent.shape,
-                        device=device,
-                        generator=rand_num_generator,
-                    )  # [B, 4, h, w]
-
-                # Add noise to the latents (diffusion forward process)
-                noisy_latents = self.training_noise_scheduler.add_noise(
-                    rgb_latent, noise, timesteps
+                rgb_latent = torch.randn(
+                    field_latent.shape,
+                    device=device,
+                    generator=rand_num_generator,
                 )  # [B, 4, h, w]
 
                 # Text embedding
@@ -305,36 +283,62 @@ class MarigoldTrainer:
                     (batch_size, 1, 1)
                 )  # [B, 77, 1024]
 
-                # Concat field and rgb latents
-                cat_latents = torch.cat(
-                    [field_latent, noisy_latents], dim=1
-                )  # [B, 8, h, w]
-                cat_latents = cat_latents.float()
-                cat_latents =  self.model.scheduler.scale_model_input(cat_latents, timesteps)
+                guidance_scale = 7.5
 
-                # Predict the noise residual
-                model_pred = self.model.unet(
-                    cat_latents, timesteps, text_embed
-                ).sample  # [B, 4, h, w]
-                if torch.isnan(model_pred).any():
-                    logging.warning("model_pred contains NaN.")
+                # guidance embedding
+                uncond_input = self.model.tokenizer(
+                    [""] * rgb_latent.shape[0], padding="max_length", max_length=self.model.tokenizer.model_max_length, return_tensors="pt"
+                )
+                with torch.no_grad():
+                    uncond_embeddings = self.model.text_encoder(uncond_input.input_ids.to(device))[0]  
+                text_embeddings = torch.cat([uncond_embeddings, text_embed])
 
-                # Get the target for loss depending on the prediction type
-                if "sample" == self.prediction_type:
-                    target = rgb_latent
-                elif "epsilon" == self.prediction_type:
-                    target = noise
-                elif "v_prediction" == self.prediction_type:
-                    target = self.training_noise_scheduler.get_velocity(
-                        rgb_latent, noise, timesteps
-                    )  # [B, 4, h, w]
-                else:
-                    raise ValueError(f"Unknown prediction type {self.prediction_type}")
+                rgb_latent = rgb_latent * self.model.scheduler.init_noise_sigma
 
-               
-                latent_loss = self.loss(model_pred.float(), target.float())
 
-                loss = latent_loss.mean()
+                for i, t in enumerate(timesteps):            
+                    unet_input = torch.cat(
+                        [field_latent, rgb_latent], dim=1
+                    )  # this order is important
+
+                    # guidance
+                    unet_input = torch.cat([unet_input] * 2)
+                    unet_input =  self.model.scheduler.scale_model_input(unet_input, t)
+
+                    # predict the noise residual
+                    noise_pred = self.model.unet(
+                        unet_input, t, encoder_hidden_states=text_embeddings
+                    ).sample  # [B, 4, h, w]
+
+                    # perform guidance
+                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+                    # compute the previous noisy sample x_t -> x_t-1
+                    rgb_latent = self.model.scheduler.step(
+                        noise_pred, t, rgb_latent
+                    ).prev_sample
+
+                rgb = self.model.decode_rgb(rgb_latent)
+
+                # find the perspective field of the generated image
+                keys_to_extract = ['pred_gravity_original', 'pred_latitude_original']
+
+                rgb = torch.clip(rgb, -1.0, 1.0)
+                rgb = ((rgb + 1.0) / 2.0).squeeze()
+
+                inputs = {"image": rgb, "height": rgb.shape[2], "width": rgb.shape[2]}
+                generated_field = self.pf_model.forward([inputs])[0]
+
+                latitude_map = generated_field['pred_latitude_original']
+                gravity_maps = generated_field['pred_gravity_original']
+                latitude_map = latitude_map / 90
+                joined_maps = torch.cat([gravity_maps, latitude_map.unsqueeze(0),], dim = 0)
+                joined_maps = joined_maps.unsqueeze(0)
+
+
+                # compute the loss
+                loss = self.pf_loss(joined_maps, field)
 
                 self.train_metrics.update("loss", loss.item())
 
@@ -521,6 +525,9 @@ class MarigoldTrainer:
             tqdm(data_loader, desc=f"evaluating on {data_loader.dataset.disp_name}"),
             start=1,
         ):
+
+            if i == 10:
+                break 
             
             assert 1 == data_loader.batch_size
             # Read input field
