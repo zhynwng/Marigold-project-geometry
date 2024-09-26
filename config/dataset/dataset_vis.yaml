@@ -2,6 +2,6 @@ dataset:
   vis:
   - name: kandinsky_indoor_field
     disp_name: mini
-    dir: /share/data/p2p/yz5880/mini
-    filenames: /share/data/p2p/yz5880/mini_list.txt
+    dir: /share/data/p2p/zhiyanw/mini_real
+    filenames: /share/data/p2p/zhiyanw/mini_real_list.txt
     has_filled_depth: False

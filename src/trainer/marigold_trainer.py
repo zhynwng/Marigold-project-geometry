@@ -52,6 +52,7 @@ from src.util.alignment import align_depth_least_square
 from src.util.seeding import generate_seed_sequence
 
 
+
 class MarigoldTrainer:
     def __init__(
         self,
@@ -520,9 +521,6 @@ class MarigoldTrainer:
             tqdm(data_loader, desc=f"evaluating on {data_loader.dataset.disp_name}"),
             start=1,
         ):
-
-            if i == 10:
-                break
             
             assert 1 == data_loader.batch_size
             # Read input field
