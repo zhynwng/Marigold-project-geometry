@@ -234,6 +234,7 @@ class PerspectiveFields(nn.Module):
         images = [x["image"].to(self.device) for x in batched_inputs]
         images = [(x - self.pixel_mean) / self.pixel_std for x in images]
         images = torch.stack(images)
+
         hl_features = self.backbone(images)
         ll_features = self.ll_enc(images)
         features = {
@@ -253,11 +254,10 @@ class PerspectiveFields(nn.Module):
             targets_dict["gt_latitude"] = targets
 
         results = self.persformer_heads.inference(features)
-
-        '''
         processed_results = self.persformer_heads.postprocess(
             results, batched_inputs, images
         )
+    
         if self.param_net is not None:
             param = self.param_net(results, batched_inputs)
             if "pred_general_vfov" not in param.keys():
@@ -270,5 +270,4 @@ class PerspectiveFields(nn.Module):
             for i in range(len(processed_results)):
                 param_tmp = {k: v[i] for k, v in param.items()}
                 processed_results[i].update(param_tmp)
-        '''
-        return results
+        return processed_results

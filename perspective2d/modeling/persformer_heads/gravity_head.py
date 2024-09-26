@@ -237,6 +237,7 @@ class GravityDecoder(BaseDecodeHead):
     def postprocess(self, results, batched_inputs, images):
         processed_results = []
         for result, input_per_image in zip(results, batched_inputs):
+            print(result.argmax(dim=0))
             height = input_per_image.get("height")
             width = input_per_image.get("width")
             if self.loss_type == "regression":
@@ -252,6 +253,7 @@ class GravityDecoder(BaseDecodeHead):
                 .unsqueeze(-1)
                 .to(vec.device)
             )
+
             vec_original = vec * scale
             vec_original = pf_postprocess(vec_original, self.image_size, height, width)
             vec_original = F.normalize(vec_original, dim=0)
