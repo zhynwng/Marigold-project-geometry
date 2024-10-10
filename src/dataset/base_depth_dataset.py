@@ -119,12 +119,13 @@ class BaseDepthDataset(Dataset):
         return batch
 
     def _get_data_item(self, index):
-        img_rel_path, field_rel_path, filled_rel_path = self._get_data_path(index=index)
+        img_rel_path, object_rel_path, shadow_rel_path = self._get_data_path(index=index)
 
         batch = {}
 
         batch["image"] = self._read_image(img_rel_path)
-        batch["field"] = self._read_image(field_rel_path)
+        batch["object"] = self._read_OS(object_rel_path)
+        batch["shadow"] = self._read_OS(shadow_rel_path)
 
         return batch
 
@@ -160,13 +161,10 @@ class BaseDepthDataset(Dataset):
 
         # Get data path
         rgb_rel_path = filename_line[0]
+        object_rel_path = filename_line[1]
+        shadow_rel_path = filename_line[2]
 
-        depth_rel_path, filled_rel_path = None, None
-        if DatasetMode.RGB_ONLY != self.mode:
-            depth_rel_path = filename_line[1]
-            if self.has_filled_depth:
-                filled_rel_path = filename_line[2]
-        return rgb_rel_path, depth_rel_path, filled_rel_path
+        return rgb_rel_path, object_rel_path, shadow_rel_path
 
     def _read_image(self, img_rel_path) -> np.ndarray:
         if self.is_tar:
@@ -190,6 +188,16 @@ class BaseDepthDataset(Dataset):
 
         image = np.asarray(image)
         return image
+
+    def _read_OS(self, OS_rel_path) -> np.ndarray:
+        OS_to_read = os.path.join(self.dataset_dir, OS_rel_path)
+        OS = Image.open(OS_to_read)
+        OS = np.asarray(OS)
+        OS = np.expand_dims(OS, axis=0)
+        OS = np.repeat(OS, 3, axis=0)
+        return OS
+
+
 
     def transform_maps(self, latitude_map, gravity_maps):
         latitude_map = latitude_map / 90

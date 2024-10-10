@@ -83,7 +83,7 @@ class MarigoldTrainer:
         self.accumulation_steps: int = accumulation_steps
 
         # Adapt input layers
-        if 8 != self.model.unet.config["in_channels"]:
+        if 12 != self.model.unet.config["in_channels"]:
             self._replace_unet_conv_in_zero_intialization()
 
         # Encode empty text prompt
@@ -194,11 +194,12 @@ class MarigoldTrainer:
         _weight = self.model.unet.conv_in.weight.clone()  # [320, 4, 3, 3]
         _bias = self.model.unet.conv_in.bias.clone()  # [320]
         _weight_add = torch.zeros(_weight.shape)
-        _weight = torch.cat((_weight_add, _weight), 1) # [320, 8, 3, 3]
+        _weight_add_2 = torch.zeros(_weight.shape)
+        _weight = torch.cat((_weight_add, _weight_add_2, _weight), 1) # [320, 12, 3, 3]
         # new conv_in channel
         _n_convin_out_channel = self.model.unet.conv_in.out_channels
         _new_conv_in = Conv2d(
-            8, _n_convin_out_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
+            12, _n_convin_out_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
         )
 
         _new_conv_in.weight = Parameter(_weight)
@@ -206,7 +207,7 @@ class MarigoldTrainer:
         self.model.unet.conv_in = _new_conv_in
         logging.info("Unet conv_in layer is replaced")
         # replace config
-        self.model.unet.config["in_channels"] = 8
+        self.model.unet.config["in_channels"] = 12
         logging.info("Unet config is updated with zero initialization")
         return
 
@@ -248,20 +249,30 @@ class MarigoldTrainer:
 
                 # Get data
                 rgb = batch["image"].to(device).to(torch.float32)
-                field = batch["field"].to(device).to(torch.float32)
+                obj = batch["object"].to(device).to(torch.float32)
+                shadow = batch["shadow"].to(device).to(torch.float32)
 
                 # normalize rgb 
                 rgb_norm: torch.Tensor = rgb / 255.0 * 2.0 - 1.0  #  [0, 255] -> [-1, 1]
                 rgb_norm = rgb_norm.float()
                 assert rgb_norm.min() >= -1.0 and rgb_norm.max() <= 1.0
 
+                obj_norm: torch.Tensor = obj / 255.0 * 2.0 - 1.0  #  [0, 255] -> [-1, 1]
+                obj_norm = obj_norm.float()
+                assert obj_norm.min() >= -1.0 and obj_norm.max() <= 1.0
+
+                shadow_norm: torch.Tensor = shadow / 255.0 * 2.0 - 1.0  #  [0, 255] -> [-1, 1]
+                shadow_norm = obj_norm.float()
+                assert shadow_norm.min() >= -1.0 and shadow_norm.max() <= 1.0
 
                 batch_size = rgb.shape[0]
                 with torch.no_grad():
                     # Encode image
                     rgb_latent = self.model.encode_rgb(rgb_norm)  # [B, 4, h, w]
-                    # Encode field depth
-                    field_latent = self.model.encode_field(field)  # [B, 4, h, w]
+                    # Encode object shadow
+                    obj_latent = self.model.encode_rgb(obj_norm)  # [B, 4, h, w]
+                    shadow_latent = self.model.encode_rgb(shadow_norm)  # [B, 4, h, w]
+
 
                 # Sample a random timestep for each image
                 
@@ -307,7 +318,7 @@ class MarigoldTrainer:
 
                 # Concat field and rgb latents
                 cat_latents = torch.cat(
-                    [field_latent, noisy_latents], dim=1
+                    [obj_latent, shadow_latent, noisy_latents], dim=1
                 )  # [B, 8, h, w]
                 cat_latents = cat_latents.float()
                 cat_latents =  self.model.scheduler.scale_model_input(cat_latents, timesteps)
@@ -521,11 +532,13 @@ class MarigoldTrainer:
             tqdm(data_loader, desc=f"evaluating on {data_loader.dataset.disp_name}"),
             start=1,
         ):
-            
+            if i == 10:
+                break
             assert 1 == data_loader.batch_size
-            # Read input field
+            # Read input shadow
             # print(batch)
-            field_in = batch["field"].to(self.device).to(torch.float32)
+            obj_in = batch["object"].to(self.device).to(torch.float32)
+            shadow_in = batch["shadow"].to(self.device).to(torch.float32)
             rgb_in = batch["image"].to(self.device).to(torch.float32)
             # [1, 3, H, W]
 
@@ -539,7 +552,8 @@ class MarigoldTrainer:
 
             # Predict depth
             pipe_out: MarigoldOutput = self.model(
-                field_in,
+                obj_in,
+                shadow_in,
                 denoising_steps=self.cfg.validation.denoising_steps,
                 ensemble_size=self.cfg.validation.ensemble_size,
                 processing_res=self.cfg.validation.processing_res,
@@ -552,37 +566,17 @@ class MarigoldTrainer:
             )
 
             image_pred: Image.Image = pipe_out.image
-            field_pred: np.ndarray = pipe_out.field
-            vis_pred: Image.Image = pipe_out.field_visualized
             
             if save_to_dir is not None:
                 output_dir_jpg = os.path.join(save_to_dir, "image")
-                output_dir_field = os.path.join(save_to_dir, "field")
-                output_dir_vis = os.path.join(save_to_dir, "field_visualization")
                 os.makedirs(output_dir_jpg, exist_ok=True)
-                os.makedirs(output_dir_field, exist_ok=True)
-                os.makedirs(output_dir_vis, exist_ok=True)
 
-                
                  # save image
                 pred_name_base = str(i) + "_pred"
                 jpg_save_path = os.path.join(output_dir_jpg, f"{pred_name_base}.jpg")
                 if os.path.exists(jpg_save_path):
                     logging.warning(f"Existing file: '{jpg_save_path}' will be overwritten")
                 image_pred.save(jpg_save_path)
-
-                # Save field
-                
-                field_save_path = os.path.join(output_dir_field, f"{pred_name_base}.pt")
-                if os.path.exists(field_save_path):
-                    logging.warning(f"Existing file: '{field_save_path}' will be overwritten")
-                torch.save(field_pred, field_save_path,)
-
-                # save visualized image
-                vis_save_path = os.path.join(output_dir_vis, f"{pred_name_base}.jpg")
-                if os.path.exists(vis_save_path):
-                    logging.warning(f"Existing file: '{vis_save_path}' will be overwritten")
-                vis_pred.save(vis_save_path)
 
         return metric_tracker.result()
         

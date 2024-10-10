@@ -65,8 +65,6 @@ class MarigoldOutput(BaseOutput):
     """
 
     image: Image.Image
-    field: np.ndarray
-    field_visualized: Image.Image
 
 
 class MarigoldPipeline(DiffusionPipeline):
@@ -149,7 +147,8 @@ class MarigoldPipeline(DiffusionPipeline):
     @torch.no_grad()
     def __call__(
         self,
-        input_field: torch.Tensor ,
+        input_object: torch.Tensor ,
+        input_shadow: torch.Tensor, 
         denoising_steps: Optional[int] = None,
         ensemble_size: int = 5,
         processing_res: Optional[int] = None,
@@ -220,23 +219,24 @@ class MarigoldPipeline(DiffusionPipeline):
 
         # ----------------- Image Preprocess -----------------
         # Convert to torch tensor
-        input_size = input_field.shape
+        input_size = input_shadow.shape
         assert (
-            4 == input_field.dim() and 3 == input_size[-3]
+            4 == input_shadow.dim() and 3 == input_size[-3]
         ), f"Wrong input shape {input_size}, expected [1, rgb, H, W]"
 
         # Resize image
         if processing_res > 0:
-            input_field = resize_max_res(
-                input_field,
+            input_shadow = resize_max_res(
+                input_shadow,
                 max_edge_resolution=processing_res,
                 resample_method=resample_method,
             )
 
-        # ----------------- Predicting perspective field -----------------
+        # ----------------- Predicting image -----------------
         # Batch repeated input image
-        duplicated_field = input_field.expand(ensemble_size, -1, -1, -1)
-        single_field_dataset = TensorDataset(duplicated_field)
+        duplicated_shadow = input_shadow.expand(ensemble_size, -1, -1, -1)
+        duplicated_object = input_object.expand(ensemble_size, -1, -1, -1)
+        single_OS_dataset = TensorDataset(duplicated_object, duplicated_shadow)
         if batch_size > 0:
             _bs = batch_size
         else:
@@ -246,22 +246,23 @@ class MarigoldPipeline(DiffusionPipeline):
                 dtype=self.dtype,
             )
 
-        single_field_loader = DataLoader(
-            single_field_dataset, batch_size=_bs, shuffle=False
+        single_OS_loader = DataLoader(
+            single_OS_dataset, batch_size=_bs, shuffle=False
         )
 
-        # Predict perspective field maps (batched)
+        # Predict image (batched)
         rgb_pred_ls = []
         if show_progress_bar:
             iterable = tqdm(
-                single_field_loader, desc=" " * 2 + "Inference batches", leave=False
+                single_OS_loader, desc=" " * 2 + "Inference batches", leave=False
             )
         else:
-            iterable = single_field_loader
+            iterable = single_OS_loader
         for batch in iterable:
-            (batched_field,) = batch
+            (batched_object, batched_shadow, ) = batch
             rgb_pred_raw = self.single_infer(
-                field_in=batched_field,
+                object_in=batched_object,
+                shadow_in=batched_shadow,
                 num_inference_steps=denoising_steps,
                 show_pbar=show_progress_bar,
                 generator=generator,
@@ -275,15 +276,8 @@ class MarigoldPipeline(DiffusionPipeline):
         rgb_pred = ((rgb_pred + 1.0) / 2.0).squeeze()
         rgb = (rgb_pred.permute(1, 2, 0) * 255).to(torch.uint8).cpu().numpy()
         
-        field = input_field.squeeze().cpu().permute(1,2,0).numpy()
-
-        # Visualize; would need further work
-        field_visualized =  draw_perspective_fields(rgb, field[:, :, :2], np.deg2rad(field[:, :, 2] * 90))
-
         return MarigoldOutput (
             image = Image.fromarray(rgb),
-            field = torch.tensor(field), 
-            field_visualized = Image.fromarray(field_visualized),
         )
 
     def _check_inference_step(self, n_step: int) -> None:
@@ -322,7 +316,8 @@ class MarigoldPipeline(DiffusionPipeline):
     @torch.no_grad()
     def single_infer(
         self,
-        field_in: torch.Tensor,
+        object_in: torch.Tensor,
+        shadow_in: torch.Tensor, 
         num_inference_steps: int,
         generator: Union[torch.Generator, None],
         show_pbar: bool,
@@ -331,8 +326,8 @@ class MarigoldPipeline(DiffusionPipeline):
         Perform an individual depth prediction without ensembling.
 
         Args:
-            field_in (`torch.Tensor`):
-                Input RGB image.
+            object_in (`torch.Tensor`):
+                Input object image.
             num_inference_steps (`int`):
                 Number of diffusion denoisign steps (DDIM) during inference.
             show_pbar (`bool`):
@@ -345,18 +340,31 @@ class MarigoldPipeline(DiffusionPipeline):
 
         guidance_scale = 7.5
         device = self.device
-        field_in = field_in.to(device)
+        object_in = object_in.to(device)
+        shadow_in = shadow_in.to(device)
+
 
         # Set timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps  # [T]
 
-        # Encode field
-        field_latent = self.encode_field(field_in) #flag
+        # Encode OS
+        obj_norm: torch.Tensor = object_in / 255.0 * 2.0 - 1.0  #  [0, 255] -> [-1, 1]
+        obj_norm = obj_norm.float()
+        assert obj_norm.min() >= -1.0 and obj_norm.max() <= 1.0
+
+        shadow_norm: torch.Tensor = shadow_in / 255.0 * 2.0 - 1.0  #  [0, 255] -> [-1, 1]
+        shadow_norm = obj_norm.float()
+        assert shadow_norm.min() >= -1.0 and shadow_norm.max() <= 1.0
+
+
+        # Encode object shadow
+        obj_latent = self.encode_rgb(obj_norm)  # [B, 4, h, w]
+        shadow_latent = self.encode_rgb(shadow_norm)  # [B, 4, h, w]
 
         # Initial image latent (noise)
         rgb_latent = torch.randn(
-            field_latent.shape,
+            obj_latent.shape,
             device=device,
             dtype=self.dtype,
             generator=generator,
@@ -393,7 +401,7 @@ class MarigoldPipeline(DiffusionPipeline):
 
         for i, t in iterable:            
             unet_input = torch.cat(
-                [field_latent, rgb_latent], dim=1
+                [obj_latent, shadow_latent, rgb_latent], dim=1
             )  # this order is important
 
             # guidance

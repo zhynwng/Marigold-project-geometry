@@ -1,7 +1,7 @@
 dataset:
   vis:
-  - name: kandinsky_indoor_field
-    disp_name: mini
-    dir: /share/data/p2p/zhiyanw/mini_real
-    filenames: /share/data/p2p/zhiyanw/mini_real_list.txt
+  - name: kandinsky_indoor_OS
+    disp_name: OS_train
+    dir: /share/data/p2p/zhiyanw/Indoor_OS
+    filenames: /share/data/p2p/zhiyanw/Indoor_OS_list.txt
     has_filled_depth: False
