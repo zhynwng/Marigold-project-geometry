@@ -175,9 +175,8 @@ class MarigoldTrainer:
 
 
         # Perspective Field extractor
-        version = 'PersNet-360Cities'
-        self.pf_model = PerspectiveFields(version).cuda()
-        self.pf_model.requires_grad_(False)
+        version = 'Paramnet-360Cities-edina-centered'
+        self.pf_model = PerspectiveFields(version).eval().cuda()
 
     def _replace_unet_conv_in(self):
         # replace the first layer to accept 8 in_channels
@@ -325,9 +324,9 @@ class MarigoldTrainer:
                 keys_to_extract = ['pred_gravity_original', 'pred_latitude_original']
 
                 rgb = torch.clip(rgb, -1.0, 1.0)
-                rgb = ((rgb + 1.0) / 2.0).squeeze()
+                rgb = ((rgb + 1.0) / 2.0).squeeze() * 255
 
-                inputs = {"image": rgb, "height": rgb.shape[2], "width": rgb.shape[2]}
+                inputs = {"image": rgb, "height": rgb.shape[1], "width": rgb.shape[2]}
                 generated_field = self.pf_model.forward([inputs])[0]
 
                 latitude_map = generated_field['pred_latitude_original']
