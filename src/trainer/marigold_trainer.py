@@ -237,6 +237,7 @@ class MarigoldTrainer:
         self.train_metrics.reset()
         accumulated_step = 0
 
+        self.visualize()
 
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
@@ -265,7 +266,7 @@ class MarigoldTrainer:
                     # Encode field depth
                     field_latent = self.model.encode_field(field)  # [B, 4, h, w]
 
-                num_inference_steps = 2
+                num_inference_steps = 15
 
                 self.model.scheduler.set_timesteps(num_inference_steps, device=device)
                 timesteps = self.model.scheduler.timesteps
@@ -525,7 +526,7 @@ class MarigoldTrainer:
             start=1,
         ):
 
-            if i == 10:
+            if i == 1000:
                 break 
             
             assert 1 == data_loader.batch_size
