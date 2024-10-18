@@ -35,7 +35,7 @@ trainer:
   training_noise_scheduler:
     pretrained_path: miniSD
   init_seed: 2024  # use null to train w/o seeding
-  save_period: 2000
+  save_period: 1000
   backup_period: 2000
   validation_period: 2000
   visualization_period: 1000
