@@ -237,7 +237,7 @@ class MarigoldTrainer:
         self.train_metrics.reset()
         accumulated_step = 0
 
-        self.visualize()
+        self.visualize_contrastive()
 
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
@@ -491,6 +491,114 @@ class MarigoldTrainer:
                     )
 
     '''
+
+    def visualize_contrastive(self):
+        vis_out_dir = "/share/data/p2p/zhiyanw/contrastive_example"
+        os.makedirs(vis_out_dir, exist_ok=True)
+        _ = self.validate_contrastive(
+            data_loader=self.train_loader,
+            metric_tracker=self.val_metrics,
+            save_to_dir=vis_out_dir,
+        )
+
+
+    @torch.no_grad()
+    def validate_contrastive(
+        self,
+        data_loader: DataLoader,
+        metric_tracker: MetricTracker,
+        save_to_dir: str = None,
+    ):
+        self.model.to(self.device)
+        metric_tracker.reset()
+
+        # Generate seed sequence for consistent evaluation
+        val_init_seed = self.cfg.validation.init_seed
+        val_seed_ls = generate_seed_sequence(val_init_seed, len(data_loader))
+
+
+        img_dir = os.path.join(save_to_dir, "images")
+        field_dir = os.path.join(save_to_dir, "fields")
+        for i, batch in enumerate(
+            tqdm(data_loader, desc=f"evaluating on {data_loader.dataset.disp_name}"),
+            start=1,
+        ):
+            
+            assert 1 == data_loader.batch_size
+            # Read input field
+            # print(batch)
+            field_in = batch["field"].to(self.device).to(torch.float32)
+            rgb_in = batch["image"].to(self.device).to(torch.float32)
+            # [1, 3, H, W]
+
+        
+            # Random number generator
+            seed = val_seed_ls.pop()
+            if seed is None:
+                generator = None
+            else:
+                generator = torch.Generator(device=self.device)
+                generator.manual_seed(seed)
+
+            # generate 10 image for each perspective field, and generate perspective
+            # field for each of them
+            for j in range(10):
+                # Predict depth
+                pipe_out: MarigoldOutput = self.model(
+                    field_in,
+                    denoising_steps=self.cfg.validation.denoising_steps,
+                    ensemble_size=self.cfg.validation.ensemble_size,
+                    processing_res=self.cfg.validation.processing_res,
+                    match_input_res=self.cfg.validation.match_input_res,
+                    generator=generator,
+                    batch_size=1,  # use batch size 1 to increase reproducibility
+                    color_map=None,
+                    show_progress_bar=False,
+                    resample_method=self.cfg.validation.resample_method,
+                )
+
+                image_pred: Image.Image = pipe_out.image
+                field_pred: np.ndarray = pipe_out.field
+
+                if save_to_dir is not None:
+                    output_dir_jpg = os.path.join(img_dir, "image_" + str(i))
+                    output_dir_field = os.path.join(field_dir, "field_" + str(i))
+                    os.makedirs(output_dir_jpg, exist_ok=True)
+                    os.makedirs(output_dir_field, exist_ok=True)
+                    
+                    # save image
+                    pred_name_base = str(j) + "_pred"
+                    jpg_save_path = os.path.join(output_dir_jpg, f"{pred_name_base}.jpg")
+                    if os.path.exists(jpg_save_path):
+                        logging.warning(f"Existing file: '{jpg_save_path}' will be overwritten")
+                    image_pred.save(jpg_save_path)
+
+                    # Save field
+                    img_np = np.asarray(image_pred)
+                    img_np = torch.as_tensor(img_np.astype("float32").transpose(2, 0, 1))
+                    img_input =  {"image": img_np, "height": img_np.shape[1], "width": img_np.shape[2]}
+
+                    field_map = self.pf_model.forward([img_input])[0]
+                    latitude_map = field_map['pred_latitude_original']
+                    gravity_maps = field_map['pred_gravity_original']
+                    joined_maps = torch.cat([gravity_maps, latitude_map.unsqueeze(0),], dim = 0)
+
+                    field_save_path = os.path.join(output_dir_field, f"{pred_name_base}.pt")
+                    if os.path.exists(field_save_path):
+                        logging.warning(f"Existing file: '{field_save_path}' will be overwritten")
+                    torch.save(joined_maps, field_save_path,)
+
+                if j == 0:
+                    og_field_save_path = os.path.join(output_dir_field, f"original.pt")
+                    if os.path.exists(field_save_path):
+                        logging.warning(f"Existing file: '{field_save_path}' will be overwritten")
+                        torch.save(field_pred, og_field_save_path)
+
+
+        return metric_tracker.result()
+
+
+
 
     def visualize(self):
         for val_loader in self.vis_loaders:
