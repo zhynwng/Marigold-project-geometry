@@ -111,7 +111,7 @@ if __name__ == "__main__":
     print("category:", category)
 
     # base_path = "/share/data/p2p/yz5880/eval_mini/"
-    base_path = "/share/data/p2p/yz5880/Marigold/output/train_marigold/visualization/iter_000000/mini/"
+    base_path = "/share/data/p2p/zhiyanw/"
     image_data_paths = [""]
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

@@ -178,6 +178,7 @@ class MarigoldTrainer:
         version = 'Paramnet-360Cities-edina-centered'
         self.pf_model = PerspectiveFields(version).eval().cuda()
 
+
     def _replace_unet_conv_in(self):
         # replace the first layer to accept 8 in_channels
         _weight = self.model.unet.conv_in.weight.clone()  # [320, 4, 3, 3]
@@ -237,13 +238,15 @@ class MarigoldTrainer:
         self.train_metrics.reset()
         accumulated_step = 0
 
+        # self.visualize_contrastive()
+        # return
 
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
             logging.debug(f"epoch: {self.epoch}")
 
             # Skip previous batches when resume
-            for step, batch in enumerate(tqdm(skip_first_batches(self.train_loader, self.n_batch_in_epoch))):
+            for batch in skip_first_batches(self.train_loader, self.n_batch_in_epoch):
                 self.model.unet.train()
 
                 # globally consistent random generators
@@ -258,6 +261,8 @@ class MarigoldTrainer:
 
                 # We just need the perspective field
                 field = batch["field"].to(device).to(torch.float32)
+                best_pf = batch["best_pf"].to(device).to(torch.float32)
+                worst_pf = batch["worst_pf"].to(device).to(torch.float32)
 
 
                 batch_size = field.shape[0]
@@ -265,7 +270,7 @@ class MarigoldTrainer:
                     # Encode field depth
                     field_latent = self.model.encode_field(field)  # [B, 4, h, w]
 
-                num_inference_steps = 2
+                num_inference_steps = 15
 
                 self.model.scheduler.set_timesteps(num_inference_steps, device=device)
                 timesteps = self.model.scheduler.timesteps
@@ -294,130 +299,105 @@ class MarigoldTrainer:
 
                 rgb_latent = rgb_latent * self.model.scheduler.init_noise_sigma
 
-                for k in range(5):
-                    for i, t in enumerate(timesteps):            
-                        unet_input = torch.cat(
-                            [field_latent, rgb_latent], dim=1
-                        )  # this order is important
 
-                        # guidance
-                        unet_input = torch.cat([unet_input] * 2)
-                        unet_input =  self.model.scheduler.scale_model_input(unet_input, t)
+                for i, t in enumerate(timesteps):            
+                    unet_input = torch.cat(
+                        [field_latent, rgb_latent], dim=1
+                    )  # this order is important
 
-                        # predict the noise residual
-                        noise_pred = self.model.unet(
-                            unet_input, t, encoder_hidden_states=text_embeddings
-                        ).sample  # [B, 4, h, w]
+                    # guidance
+                    unet_input = torch.cat([unet_input] * 2)
+                    unet_input =  self.model.scheduler.scale_model_input(unet_input, t)
 
-                        # perform guidance
-                        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                    # predict the noise residual
+                    noise_pred = self.model.unet(
+                        unet_input, t, encoder_hidden_states=text_embeddings
+                    ).sample  # [B, 4, h, w]
 
-                        # compute the previous noisy sample x_t -> x_t-1
-                        rgb_latent = self.model.scheduler.step(
-                            noise_pred, t, rgb_latent
-                        ).prev_sample
+                    # perform guidance
+                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
-                    rgb = self.model.decode_rgb(rgb_latent)
+                    # compute the previous noisy sample x_t -> x_t-1
+                    rgb_latent = self.model.scheduler.step(
+                        noise_pred, t, rgb_latent
+                    ).prev_sample
 
-                    # find the perspective field of the generated image
-                    # keys_to_extract = ['pred_gravity_original', 'pred_latitude_original']
+                rgb = self.model.decode_rgb(rgb_latent)
 
-                    rgb = torch.clip(rgb, -1.0, 1.0)
-                    rgb = ((rgb + 1.0) / 2.0).squeeze() * 255
-                    rgb_Image = Image.fromarray((rgb.permute(1, 2, 0)).to(torch.uint8).cpu().numpy())
+                # find the perspective field of the generated image
+                keys_to_extract = ['pred_gravity_original', 'pred_latitude_original']
 
-                    inputs = {"image": rgb, "height": rgb.shape[1], "width": rgb.shape[2]}
-                    generated_field = self.pf_model.forward([inputs])[0]
+                rgb = torch.clip(rgb, -1.0, 1.0)
+                rgb = ((rgb + 1.0) / 2.0).squeeze() * 255
 
-                    latitude_map = generated_field['pred_latitude_original']
-                    gravity_maps = generated_field['pred_gravity_original']
-                    latitude_map = latitude_map / 90
-                    joined_maps = torch.cat([gravity_maps, latitude_map.unsqueeze(0),], dim = 0)
-                    joined_maps = joined_maps.unsqueeze(0)
+                inputs = {"image": rgb, "height": rgb.shape[1], "width": rgb.shape[2]}
+                generated_field = self.pf_model.forward([inputs])[0]
 
-                    save_to_dir = "/share/data/p2p/yz5880/contrastive_samples"
-                    if save_to_dir is not None:
-                        output_dir_jpg = os.path.join(save_to_dir, f"image/image_{step}/")
-                        output_dir_field = os.path.join(save_to_dir, f"field/field_{step}")
-                        # output_dir_vis = os.path.join(save_to_dir, "field_visualization")
-                        os.makedirs(output_dir_jpg, exist_ok=True)
-                        os.makedirs(output_dir_field, exist_ok=True)
-                        # os.makedirs(output_dir_vis, exist_ok=True)
-
-                        
-                        # save image
-                        pred_name_base = str(k) + "_pred"
-                        jpg_save_path = os.path.join(output_dir_jpg, f"{pred_name_base}.jpg")
-                        if os.path.exists(jpg_save_path):
-                            logging.warning(f"Existing file: '{jpg_save_path}' will be overwritten")
-                        rgb_Image.save(jpg_save_path)
-
-                        # Save field
-                        
-                        field_save_path = os.path.join(output_dir_field, f"{pred_name_base}.pt")
-                        if os.path.exists(field_save_path):
-                            logging.warning(f"Existing file: '{field_save_path}' will be overwritten")
-                        torch.save(joined_maps, field_save_path,)
+                latitude_map = generated_field['pred_latitude_original']
+                gravity_maps = generated_field['pred_gravity_original']
+                latitude_map = latitude_map / 90
+                joined_maps = torch.cat([gravity_maps, latitude_map.unsqueeze(0),], dim = 0)
+                joined_maps = joined_maps.unsqueeze(0)
 
 
                 # compute the loss
-                # L_contrastive = self.contrastive_loss(joined_maps, pf_best, pf_worst)
-                # L_consistency = self.pf_loss(joined_maps, field)
-                # loss = L_contrastive + L_consistency
+                contrastive_loss = self.contrastive_loss(joined_maps, best_pf, worst_pf)
+                consistency_loss = self.pf_loss(joined_maps, field)
+                loss = contrastive_loss + consistency_loss
 
-                # self.train_metrics.update("loss", loss.item())
+                self.train_metrics.update("loss", loss.item())
 
-                # loss = loss / self.gradient_accumulation_steps
-                # loss.backward()
-                # accumulated_step += 1
+                loss = loss / self.gradient_accumulation_steps
+                loss.backward()
+                accumulated_step += 1
 
                 self.n_batch_in_epoch += 1
                 # Practical batch end
 
                 # Perform optimization step
                 if accumulated_step >= self.gradient_accumulation_steps:
-                    # self.optimizer.step()
-                    # self.lr_scheduler.step()
-                    # self.optimizer.zero_grad()
+                    self.optimizer.step()
+                    self.lr_scheduler.step()
+                    self.optimizer.zero_grad()
                     accumulated_step = 0
 
                     self.effective_iter += 1
 
-                    # # Log to tensorboard
-                    # accumulated_loss = self.train_metrics.result()["loss"]
-                    # tb_logger.log_dic(
-                    #     {
-                    #         f"train/{k}": v
-                    #         for k, v in self.train_metrics.result().items()
-                    #     },
-                    #     global_step=self.effective_iter,
-                    # )
-                    # tb_logger.writer.add_scalar(
-                    #     "lr",
-                    #     self.lr_scheduler.get_last_lr()[0],
-                    #     global_step=self.effective_iter,
-                    # )
-                    # tb_logger.writer.add_scalar(
-                    #     "n_batch_in_epoch",
-                    #     self.n_batch_in_epoch,
-                    #     global_step=self.effective_iter,
-                    # )
-                    # logging.info(
-                    #     f"iter {self.effective_iter:5d} (epoch {epoch:2d}): loss={accumulated_loss:.5f}"
-                    # )
-                    # self.train_metrics.reset()
+                    # Log to tensorboard
+                    accumulated_loss = self.train_metrics.result()["loss"]
+                    tb_logger.log_dic(
+                        {
+                            f"train/{k}": v
+                            for k, v in self.train_metrics.result().items()
+                        },
+                        global_step=self.effective_iter,
+                    )
+                    tb_logger.writer.add_scalar(
+                        "lr",
+                        self.lr_scheduler.get_last_lr()[0],
+                        global_step=self.effective_iter,
+                    )
+                    tb_logger.writer.add_scalar(
+                        "n_batch_in_epoch",
+                        self.n_batch_in_epoch,
+                        global_step=self.effective_iter,
+                    )
+                    logging.info(
+                        f"iter {self.effective_iter:5d} (epoch {epoch:2d}): loss={accumulated_loss:.5f}"
+                    )
+                    self.train_metrics.reset()
 
-                    # # Per-step callback
-                    # self._train_step_callback()
+                    # Per-step callback
+                    self._train_step_callback()
 
                     # End of training
                     if self.max_iter > 0 and self.effective_iter >= self.max_iter:
-                        # self.save_checkpoint(
-                        #     ckpt_name=self._get_backup_ckpt_name(),
-                        #     save_train_state=False,
-                        # )
-                        # logging.info("Training ended.")
+                        self.save_checkpoint(
+                            ckpt_name=self._get_backup_ckpt_name(),
+                            save_train_state=False,
+                        )
+                        logging.info("Training ended.")
                         return
                     # Time's up
                     elif t_end is not None and datetime.now() >= t_end:
@@ -431,7 +411,8 @@ class MarigoldTrainer:
             # Epoch end
             self.n_batch_in_epoch = 0
 
-    def contrastive_loss(pf_gen, pf_best, pf_worst):
+
+    def contrastive_loss(self, pf_gen, pf_best, pf_worst):
         best_loss = torch.norm(pf_gen - pf_best, p=2)
         worst_loss = torch.norm(pf_gen - pf_worst, p=2)
         return best_loss - worst_loss
@@ -522,6 +503,114 @@ class MarigoldTrainer:
 
     '''
 
+    def visualize_contrastive(self):
+        vis_out_dir = "/share/data/p2p/yz5880/contrastive_samples"
+        os.makedirs(vis_out_dir, exist_ok=True)
+        _ = self.validate_contrastive(
+            data_loader=self.train_loader,
+            metric_tracker=self.val_metrics,
+            save_to_dir=vis_out_dir,
+        )
+
+
+    @torch.no_grad()
+    def validate_contrastive(
+        self,
+        data_loader: DataLoader,
+        metric_tracker: MetricTracker,
+        save_to_dir: str = None,
+    ):
+        self.model.to(self.device)
+        metric_tracker.reset()
+
+        # Generate seed sequence for consistent evaluation
+        val_init_seed = self.cfg.validation.init_seed
+        val_seed_ls = generate_seed_sequence(val_init_seed, len(data_loader))
+
+
+        img_dir = os.path.join(save_to_dir, "images")
+        field_dir = os.path.join(save_to_dir, "fields")
+        for i, batch in enumerate(
+            tqdm(data_loader, desc=f"evaluating on {data_loader.dataset.disp_name}"),
+            start=1,
+        ):
+            
+            assert 1 == data_loader.batch_size
+            # Read input field
+            # print(batch)
+            field_in = batch["field"].to(self.device).to(torch.float32)
+            rgb_in = batch["image"].to(self.device).to(torch.float32)
+            # [1, 3, H, W]
+
+        
+            # Random number generator
+            seed = val_seed_ls.pop()
+            if seed is None:
+                generator = None
+            else:
+                generator = torch.Generator(device=self.device)
+                generator.manual_seed(seed)
+
+            # generate 10 image for each perspective field, and generate perspective
+            # field for each of them
+            for j in range(5):
+                # Predict depth
+                pipe_out: MarigoldOutput = self.model(
+                    field_in,
+                    denoising_steps=self.cfg.validation.denoising_steps,
+                    ensemble_size=self.cfg.validation.ensemble_size,
+                    processing_res=self.cfg.validation.processing_res,
+                    match_input_res=self.cfg.validation.match_input_res,
+                    generator=generator,
+                    batch_size=1,  # use batch size 1 to increase reproducibility
+                    color_map=None,
+                    show_progress_bar=False,
+                    resample_method=self.cfg.validation.resample_method,
+                )
+
+                image_pred: Image.Image = pipe_out.image
+                field_pred: np.ndarray = pipe_out.field
+
+                if save_to_dir is not None:
+                    output_dir_jpg = os.path.join(img_dir, "image_" + str(i))
+                    output_dir_field = os.path.join(field_dir, "field_" + str(i))
+                    os.makedirs(output_dir_jpg, exist_ok=True)
+                    os.makedirs(output_dir_field, exist_ok=True)
+                    
+                    # save image
+                    pred_name_base = str(j) + "_pred"
+                    jpg_save_path = os.path.join(output_dir_jpg, f"{pred_name_base}.jpg")
+                    if os.path.exists(jpg_save_path):
+                        logging.warning(f"Existing file: '{jpg_save_path}' will be overwritten")
+                    image_pred.save(jpg_save_path)
+
+                    # Save field
+                    img_np = np.asarray(image_pred)
+                    img_np = torch.as_tensor(img_np.astype("float32").transpose(2, 0, 1))
+                    img_input =  {"image": img_np, "height": img_np.shape[1], "width": img_np.shape[2]}
+
+                    field_map = self.pf_model.forward([img_input])[0]
+                    latitude_map = field_map['pred_latitude_original']
+                    gravity_maps = field_map['pred_gravity_original']
+                    joined_maps = torch.cat([gravity_maps, latitude_map.unsqueeze(0),], dim = 0)
+
+                    field_save_path = os.path.join(output_dir_field, f"{pred_name_base}.pt")
+                    if os.path.exists(field_save_path):
+                        logging.warning(f"Existing file: '{field_save_path}' will be overwritten")
+                    torch.save(joined_maps, field_save_path)
+
+                if j == 0:
+                    og_field_save_path = os.path.join(output_dir_field, f"original.pt")
+                    if os.path.exists(og_field_save_path):
+                        logging.warning(f"Existing file: '{og_field_save_path}' will be overwritten")
+                    torch.save(field_pred, og_field_save_path)
+
+
+        return metric_tracker.result()
+
+
+
+
     def visualize(self):
         for val_loader in self.vis_loaders:
             vis_dataset_name = val_loader.dataset.disp_name
@@ -556,7 +645,7 @@ class MarigoldTrainer:
             start=1,
         ):
 
-            if i == 10:
+            if i >= 10:
                 break 
             
             assert 1 == data_loader.batch_size

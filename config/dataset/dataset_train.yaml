@@ -1,7 +1,7 @@
 dataset:
   train:
-    name: kandinsky_indoor_field
+    name: kandinsky_contrastive_field
     disp_name: field_train
-    dir: /share/data/p2p/zhiyanw/Indoor
-    filenames: /share/data/p2p/zhiyanw/indoor_list.txt
+    dir: /share/data/p2p/yz5880/contrastive_samples
+    filenames: /share/data/p2p/yz5880/contrastive_fields.txt
     has_filled_depth: False
