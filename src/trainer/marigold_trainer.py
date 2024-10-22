@@ -243,7 +243,7 @@ class MarigoldTrainer:
             logging.debug(f"epoch: {self.epoch}")
 
             # Skip previous batches when resume
-            for batch in skip_first_batches(self.train_loader, self.n_batch_in_epoch):
+            for step, batch in enumerate(tqdm(skip_first_batches(self.train_loader, self.n_batch_in_epoch))):
                 self.model.unet.train()
 
                 # globally consistent random generators
@@ -294,103 +294,130 @@ class MarigoldTrainer:
 
                 rgb_latent = rgb_latent * self.model.scheduler.init_noise_sigma
 
+                for k in range(5):
+                    for i, t in enumerate(timesteps):            
+                        unet_input = torch.cat(
+                            [field_latent, rgb_latent], dim=1
+                        )  # this order is important
 
-                for i, t in enumerate(timesteps):            
-                    unet_input = torch.cat(
-                        [field_latent, rgb_latent], dim=1
-                    )  # this order is important
+                        # guidance
+                        unet_input = torch.cat([unet_input] * 2)
+                        unet_input =  self.model.scheduler.scale_model_input(unet_input, t)
 
-                    # guidance
-                    unet_input = torch.cat([unet_input] * 2)
-                    unet_input =  self.model.scheduler.scale_model_input(unet_input, t)
+                        # predict the noise residual
+                        noise_pred = self.model.unet(
+                            unet_input, t, encoder_hidden_states=text_embeddings
+                        ).sample  # [B, 4, h, w]
 
-                    # predict the noise residual
-                    noise_pred = self.model.unet(
-                        unet_input, t, encoder_hidden_states=text_embeddings
-                    ).sample  # [B, 4, h, w]
+                        # perform guidance
+                        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
-                    # perform guidance
-                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                        # compute the previous noisy sample x_t -> x_t-1
+                        rgb_latent = self.model.scheduler.step(
+                            noise_pred, t, rgb_latent
+                        ).prev_sample
 
-                    # compute the previous noisy sample x_t -> x_t-1
-                    rgb_latent = self.model.scheduler.step(
-                        noise_pred, t, rgb_latent
-                    ).prev_sample
+                    rgb = self.model.decode_rgb(rgb_latent)
 
-                rgb = self.model.decode_rgb(rgb_latent)
+                    # find the perspective field of the generated image
+                    # keys_to_extract = ['pred_gravity_original', 'pred_latitude_original']
 
-                # find the perspective field of the generated image
-                keys_to_extract = ['pred_gravity_original', 'pred_latitude_original']
+                    rgb = torch.clip(rgb, -1.0, 1.0)
+                    rgb = ((rgb + 1.0) / 2.0).squeeze() * 255
+                    rgb_Image = Image.fromarray((rgb.permute(1, 2, 0)).to(torch.uint8).cpu().numpy())
 
-                rgb = torch.clip(rgb, -1.0, 1.0)
-                rgb = ((rgb + 1.0) / 2.0).squeeze() * 255
+                    inputs = {"image": rgb, "height": rgb.shape[1], "width": rgb.shape[2]}
+                    generated_field = self.pf_model.forward([inputs])[0]
 
-                inputs = {"image": rgb, "height": rgb.shape[1], "width": rgb.shape[2]}
-                generated_field = self.pf_model.forward([inputs])[0]
+                    latitude_map = generated_field['pred_latitude_original']
+                    gravity_maps = generated_field['pred_gravity_original']
+                    latitude_map = latitude_map / 90
+                    joined_maps = torch.cat([gravity_maps, latitude_map.unsqueeze(0),], dim = 0)
+                    joined_maps = joined_maps.unsqueeze(0)
 
-                latitude_map = generated_field['pred_latitude_original']
-                gravity_maps = generated_field['pred_gravity_original']
-                latitude_map = latitude_map / 90
-                joined_maps = torch.cat([gravity_maps, latitude_map.unsqueeze(0),], dim = 0)
-                joined_maps = joined_maps.unsqueeze(0)
+                    save_to_dir = "/share/data/p2p/yz5880/contrastive_samples"
+                    if save_to_dir is not None:
+                        output_dir_jpg = os.path.join(save_to_dir, f"image/image_{step}/")
+                        output_dir_field = os.path.join(save_to_dir, f"field/field_{step}")
+                        # output_dir_vis = os.path.join(save_to_dir, "field_visualization")
+                        os.makedirs(output_dir_jpg, exist_ok=True)
+                        os.makedirs(output_dir_field, exist_ok=True)
+                        # os.makedirs(output_dir_vis, exist_ok=True)
+
+                        
+                        # save image
+                        pred_name_base = str(k) + "_pred"
+                        jpg_save_path = os.path.join(output_dir_jpg, f"{pred_name_base}.jpg")
+                        if os.path.exists(jpg_save_path):
+                            logging.warning(f"Existing file: '{jpg_save_path}' will be overwritten")
+                        rgb_Image.save(jpg_save_path)
+
+                        # Save field
+                        
+                        field_save_path = os.path.join(output_dir_field, f"{pred_name_base}.pt")
+                        if os.path.exists(field_save_path):
+                            logging.warning(f"Existing file: '{field_save_path}' will be overwritten")
+                        torch.save(joined_maps, field_save_path,)
 
 
                 # compute the loss
-                loss = self.pf_loss(joined_maps, field)
+                # L_contrastive = self.contrastive_loss(joined_maps, pf_best, pf_worst)
+                # L_consistency = self.pf_loss(joined_maps, field)
+                # loss = L_contrastive + L_consistency
 
-                self.train_metrics.update("loss", loss.item())
+                # self.train_metrics.update("loss", loss.item())
 
-                loss = loss / self.gradient_accumulation_steps
-                loss.backward()
-                accumulated_step += 1
+                # loss = loss / self.gradient_accumulation_steps
+                # loss.backward()
+                # accumulated_step += 1
 
                 self.n_batch_in_epoch += 1
                 # Practical batch end
 
                 # Perform optimization step
                 if accumulated_step >= self.gradient_accumulation_steps:
-                    self.optimizer.step()
-                    self.lr_scheduler.step()
-                    self.optimizer.zero_grad()
+                    # self.optimizer.step()
+                    # self.lr_scheduler.step()
+                    # self.optimizer.zero_grad()
                     accumulated_step = 0
 
                     self.effective_iter += 1
 
-                    # Log to tensorboard
-                    accumulated_loss = self.train_metrics.result()["loss"]
-                    tb_logger.log_dic(
-                        {
-                            f"train/{k}": v
-                            for k, v in self.train_metrics.result().items()
-                        },
-                        global_step=self.effective_iter,
-                    )
-                    tb_logger.writer.add_scalar(
-                        "lr",
-                        self.lr_scheduler.get_last_lr()[0],
-                        global_step=self.effective_iter,
-                    )
-                    tb_logger.writer.add_scalar(
-                        "n_batch_in_epoch",
-                        self.n_batch_in_epoch,
-                        global_step=self.effective_iter,
-                    )
-                    logging.info(
-                        f"iter {self.effective_iter:5d} (epoch {epoch:2d}): loss={accumulated_loss:.5f}"
-                    )
-                    self.train_metrics.reset()
+                    # # Log to tensorboard
+                    # accumulated_loss = self.train_metrics.result()["loss"]
+                    # tb_logger.log_dic(
+                    #     {
+                    #         f"train/{k}": v
+                    #         for k, v in self.train_metrics.result().items()
+                    #     },
+                    #     global_step=self.effective_iter,
+                    # )
+                    # tb_logger.writer.add_scalar(
+                    #     "lr",
+                    #     self.lr_scheduler.get_last_lr()[0],
+                    #     global_step=self.effective_iter,
+                    # )
+                    # tb_logger.writer.add_scalar(
+                    #     "n_batch_in_epoch",
+                    #     self.n_batch_in_epoch,
+                    #     global_step=self.effective_iter,
+                    # )
+                    # logging.info(
+                    #     f"iter {self.effective_iter:5d} (epoch {epoch:2d}): loss={accumulated_loss:.5f}"
+                    # )
+                    # self.train_metrics.reset()
 
-                    # Per-step callback
-                    self._train_step_callback()
+                    # # Per-step callback
+                    # self._train_step_callback()
 
                     # End of training
                     if self.max_iter > 0 and self.effective_iter >= self.max_iter:
-                        self.save_checkpoint(
-                            ckpt_name=self._get_backup_ckpt_name(),
-                            save_train_state=False,
-                        )
-                        logging.info("Training ended.")
+                        # self.save_checkpoint(
+                        #     ckpt_name=self._get_backup_ckpt_name(),
+                        #     save_train_state=False,
+                        # )
+                        # logging.info("Training ended.")
                         return
                     # Time's up
                     elif t_end is not None and datetime.now() >= t_end:
@@ -404,6 +431,10 @@ class MarigoldTrainer:
             # Epoch end
             self.n_batch_in_epoch = 0
 
+    def contrastive_loss(pf_gen, pf_best, pf_worst):
+        best_loss = torch.norm(pf_gen - pf_best, p=2)
+        worst_loss = torch.norm(pf_gen - pf_worst, p=2)
+        return best_loss - worst_loss
 
     @staticmethod
     def stack_depth_images(depth_in):
