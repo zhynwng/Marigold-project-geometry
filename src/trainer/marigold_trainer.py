@@ -178,6 +178,7 @@ class MarigoldTrainer:
         version = 'Paramnet-360Cities-edina-centered'
         self.pf_model = PerspectiveFields(version).eval().cuda()
 
+
     def _replace_unet_conv_in(self):
         # replace the first layer to accept 8 in_channels
         _weight = self.model.unet.conv_in.weight.clone()  # [320, 4, 3, 3]
@@ -237,7 +238,8 @@ class MarigoldTrainer:
         self.train_metrics.reset()
         accumulated_step = 0
 
-        self.visualize_contrastive()
+        # self.visualize_contrastive()
+        # return
 
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
@@ -259,6 +261,8 @@ class MarigoldTrainer:
 
                 # We just need the perspective field
                 field = batch["field"].to(device).to(torch.float32)
+                best_pf = batch["best_pf"].to(device).to(torch.float32)
+                worst_pf = batch["worst_pf"].to(device).to(torch.float32)
 
 
                 batch_size = field.shape[0]
@@ -338,7 +342,9 @@ class MarigoldTrainer:
 
 
                 # compute the loss
-                loss = self.pf_loss(joined_maps, field)
+                contrastive_loss = self.contrastive_loss(joined_maps, best_pf, worst_pf)
+                consistency_loss = self.pf_loss(joined_maps, field)
+                loss = contrastive_loss + consistency_loss
 
                 self.train_metrics.update("loss", loss.item())
 
@@ -405,6 +411,11 @@ class MarigoldTrainer:
             # Epoch end
             self.n_batch_in_epoch = 0
 
+
+    def contrastive_loss(self, pf_gen, pf_best, pf_worst):
+        best_loss = torch.norm(pf_gen - pf_best, p=2)
+        worst_loss = torch.norm(pf_gen - pf_worst, p=2)
+        return best_loss - worst_loss
 
     @staticmethod
     def stack_depth_images(depth_in):
@@ -493,7 +504,7 @@ class MarigoldTrainer:
     '''
 
     def visualize_contrastive(self):
-        vis_out_dir = "/share/data/p2p/zhiyanw/contrastive_example"
+        vis_out_dir = "/share/data/p2p/yz5880/contrastive_samples"
         os.makedirs(vis_out_dir, exist_ok=True)
         _ = self.validate_contrastive(
             data_loader=self.train_loader,
@@ -542,7 +553,7 @@ class MarigoldTrainer:
 
             # generate 10 image for each perspective field, and generate perspective
             # field for each of them
-            for j in range(10):
+            for j in range(5):
                 # Predict depth
                 pipe_out: MarigoldOutput = self.model(
                     field_in,
@@ -586,13 +597,13 @@ class MarigoldTrainer:
                     field_save_path = os.path.join(output_dir_field, f"{pred_name_base}.pt")
                     if os.path.exists(field_save_path):
                         logging.warning(f"Existing file: '{field_save_path}' will be overwritten")
-                    torch.save(joined_maps, field_save_path,)
+                    torch.save(joined_maps, field_save_path)
 
                 if j == 0:
                     og_field_save_path = os.path.join(output_dir_field, f"original.pt")
-                    if os.path.exists(field_save_path):
-                        logging.warning(f"Existing file: '{field_save_path}' will be overwritten")
-                        torch.save(field_pred, og_field_save_path)
+                    if os.path.exists(og_field_save_path):
+                        logging.warning(f"Existing file: '{og_field_save_path}' will be overwritten")
+                    torch.save(field_pred, og_field_save_path)
 
 
         return metric_tracker.result()

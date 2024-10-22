@@ -22,7 +22,7 @@
 
 import os
 
-from .base_depth_dataset import BaseDepthDataset, get_pred_name, DatasetMode  # noqa: F401
+from .base_depth_dataset import BaseDepthDataset, BaseFieldsDataset, get_pred_name, DatasetMode  # noqa: F401
 from .diode_dataset import DIODEDataset
 from .eth3d_dataset import ETH3DDataset
 from .hypersim_dataset import HypersimDataset
@@ -40,7 +40,8 @@ dataset_name_class_dict = {
     "eth3d": ETH3DDataset,
     "diode": DIODEDataset,
     "scannet": ScanNetDataset,
-    "kandinsky_indoor_field": BaseDepthDataset
+    "kandinsky_indoor_field": BaseDepthDataset,
+    "kandinsky_contrastive_field": BaseFieldsDataset,
 }
 
 
