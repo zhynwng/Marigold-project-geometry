@@ -526,7 +526,7 @@ class MarigoldTrainer:
             start=1,
         ):
 
-            if i == 1000:
+            if i >= 10:
                 break 
             
             assert 1 == data_loader.batch_size

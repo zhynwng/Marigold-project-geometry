@@ -25,7 +25,7 @@ for fn in tqdm(lines):
 
     # Perform inference to get predictions
     predictions = pf_model.inference(img_bgr=img_bgr)
-    torch.save(predictions, "/share/data/p2p/zhiyanw/vis/"+fn.split('.')[0]+".pt")
+    torch.save(predictions, "/share/data/p2p/zhiyanw/field/"+fn.split('.')[0]+"_added.pt")
     
 
     # Draw and visualize the perspective fields based on the predictions
@@ -39,4 +39,4 @@ for fn in tqdm(lines):
     plt.axis('off')
     plt.imshow(pred_field)
 
-    plt.savefig("/share/data/p2p/zhiyanw/vis/"+fn.split('.')[0]+".png")
+    plt.savefig("/share/data/p2p/zhiyanw/vis/"+fn.split('.')[0]+"_added.png")
