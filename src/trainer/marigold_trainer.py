@@ -261,7 +261,7 @@ class MarigoldTrainer:
 
                 # We just need the perspective field
                 field = batch["field"].to(device).to(torch.float32)
-                best_pf = batch["best_pf"].to(device).to(torch.float32)
+                # best_pf = batch["best_pf"].to(device).to(torch.float32)
                 worst_pf = batch["worst_pf"].to(device).to(torch.float32)
 
 
@@ -300,7 +300,7 @@ class MarigoldTrainer:
                 rgb_latent = rgb_latent * self.model.scheduler.init_noise_sigma
 
 
-                for i, t in enumerate(timesteps):            
+                for _, t in enumerate(timesteps):            
                     unet_input = torch.cat(
                         [field_latent, rgb_latent], dim=1
                     )  # this order is important
@@ -325,9 +325,6 @@ class MarigoldTrainer:
 
                 rgb = self.model.decode_rgb(rgb_latent)
 
-                # find the perspective field of the generated image
-                keys_to_extract = ['pred_gravity_original', 'pred_latitude_original']
-
                 rgb = torch.clip(rgb, -1.0, 1.0)
                 rgb = ((rgb + 1.0) / 2.0).squeeze() * 255
 
@@ -342,8 +339,10 @@ class MarigoldTrainer:
 
 
                 # compute the loss
-                contrastive_loss = self.contrastive_loss(joined_maps, best_pf, worst_pf)
+                contrastive_loss = self.contrastive_loss(joined_maps, field, worst_pf)
+                # print("contrastive loss", contrastive_loss)
                 consistency_loss = self.pf_loss(joined_maps, field)
+                # print("consistency loss", consistency_loss)
                 loss = contrastive_loss + consistency_loss
 
                 self.train_metrics.update("loss", loss.item())
@@ -413,8 +412,8 @@ class MarigoldTrainer:
 
 
     def contrastive_loss(self, pf_gen, pf_best, pf_worst):
-        best_loss = torch.norm(pf_gen - pf_best, p=2)
-        worst_loss = torch.norm(pf_gen - pf_worst, p=2)
+        best_loss = torch.nn.MSELoss()(pf_gen, pf_best) #torch.norm(pf_gen - pf_best, p=2)
+        worst_loss = torch.nn.MSELoss()(pf_gen, pf_worst) #torch.norm(pf_gen - pf_worst, p=2)
         return best_loss - worst_loss
 
     @staticmethod

@@ -89,6 +89,7 @@ class BaseFieldsDataset(Dataset):
         self.name_mode: DepthFileNameMode = name_mode
         self.min_depth = min_depth
         self.max_depth = max_depth
+        self.device = torch.device("cuda")
 
         # training arguments
         self.depth_transform: DepthNormalizerBase = depth_transform
@@ -166,14 +167,18 @@ class BaseFieldsDataset(Dataset):
         image_to_read = img_abs_path # os.path.join(self.dataset_dir, img_abs_path)
         if image_to_read.endswith('.pt'):
             field = torch.load(image_to_read)
-            latitude_map = field[:, 2]
-            gravity_maps = field[:, :2]
+            if "original" in image_to_read:
+                field = field.permute(2, 0, 1) # [rgb, H, W]
+            latitude_map = field[2, :, :]
+            if "original" in image_to_read:
+                latitude_map = latitude_map * 90
+            gravity_maps = field[:2, :, :]
             image = self.transform_maps(latitude_map,  gravity_maps)
         else:
             image = Image.open(image_to_read)  # [H, W, rgb]
             image = np.transpose(image, (2, 0, 1)).astype(float)
 
-        image = np.asarray(image)
+        image = np.asarray(image.cpu()) # [rgb, H, W]
         return image
 
     def transform_maps(self, latitude_map, gravity_maps):

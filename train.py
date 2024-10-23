@@ -35,7 +35,7 @@ from tqdm import tqdm
 from marigold.finetune_pipeline import FinetunePipeline
 from marigold.marigold_pipeline import MarigoldPipeline
 
-from src.dataset import BaseDepthDataset, DatasetMode, get_dataset
+from src.dataset import BaseFieldsDataset, DatasetMode, get_dataset # 
 from src.dataset.mixed_sampler import MixedBatchSampler
 from src.trainer import get_trainer_cls
 from src.util.config_util import (
@@ -57,6 +57,7 @@ from src.util.logging_util import (
 from src.util.slurm_util import get_local_scratch_dir, is_on_slurm
 
 if "__main__" == __name__:
+    # torch.multiprocessing.set_start_method('spawn')# good solution !!!!
     t_start = datetime.now()
     print(f"start at {t_start}")
 
@@ -256,8 +257,8 @@ if "__main__" == __name__:
     depth_transform: DepthNormalizerBase = get_depth_normalizer(
         cfg_normalizer=cfg.depth_normalization
     )
-    print(cfg_data.train)
-    train_dataset: BaseDepthDataset = get_dataset(
+    logging.info(cfg_data.train)
+    train_dataset: BaseFieldsDataset = get_dataset(
         cfg_data.train,
         base_data_dir=base_data_dir,
         mode=DatasetMode.TRAIN,
@@ -283,6 +284,7 @@ if "__main__" == __name__:
             concat_dataset,
             batch_sampler=mixed_sampler,
             num_workers=cfg.dataloader.num_workers,
+
         )
     else:
         train_loader = DataLoader(
@@ -291,6 +293,7 @@ if "__main__" == __name__:
             num_workers=cfg.dataloader.num_workers,
             shuffle=True,
             generator=loader_generator,
+            # multiprocessing_context='spawn',
         )
     # # Validation dataset
     # val_loaders: List[DataLoader] = []
