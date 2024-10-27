@@ -54,6 +54,8 @@ from src.util.seeding import generate_seed_sequence
 
 
 from perspective2d import PerspectiveFields
+from perspective2d.utils import draw_perspective_fields
+
 
 
 class MarigoldTrainer:
@@ -493,13 +495,14 @@ class MarigoldTrainer:
     '''
 
     def visualize_contrastive(self):
-        vis_out_dir = "/share/data/p2p/zhiyanw/contrastive_example"
-        os.makedirs(vis_out_dir, exist_ok=True)
-        _ = self.validate_contrastive(
-            data_loader=self.train_loader,
-            metric_tracker=self.val_metrics,
-            save_to_dir=vis_out_dir,
-        )
+        for val_loader in self.vis_loaders:
+            vis_out_dir = "/share/data/p2p/zhiyanw/error_eval_1"
+            os.makedirs(vis_out_dir, exist_ok=True)
+            _ = self.validate_contrastive(
+                data_loader=val_loader,
+                metric_tracker=self.val_metrics,
+                save_to_dir=vis_out_dir,
+            )
 
 
     @torch.no_grad()
@@ -512,17 +515,32 @@ class MarigoldTrainer:
         self.model.to(self.device)
         metric_tracker.reset()
 
+    
         # Generate seed sequence for consistent evaluation
         val_init_seed = self.cfg.validation.init_seed
         val_seed_ls = generate_seed_sequence(val_init_seed, len(data_loader))
 
 
-        img_dir = os.path.join(save_to_dir, "images")
-        field_dir = os.path.join(save_to_dir, "fields")
+        og_dir = os.path.join(save_to_dir, "original")
+        gen_dir = os.path.join(save_to_dir, "generated")
+        con_dir = os.path.join(save_to_dir, "conditioned")
+        actual_dir = os.path.join(save_to_dir, "actual")
+        os.makedirs(og_dir, exist_ok=True)
+        os.makedirs(gen_dir, exist_ok=True)
+        os.makedirs(con_dir, exist_ok=True)
+        os.makedirs(actual_dir, exist_ok=True)
+        index = 0
+
+        output_dir_field = os.path.join(save_to_dir, "field")
+        os.makedirs(output_dir_field, exist_ok=True)
+
         for i, batch in enumerate(
             tqdm(data_loader, desc=f"evaluating on {data_loader.dataset.disp_name}"),
             start=1,
         ):
+
+            if (i >= 2):
+                break
             
             assert 1 == data_loader.batch_size
             # Read input field
@@ -540,9 +558,11 @@ class MarigoldTrainer:
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(seed)
 
-            # generate 10 image for each perspective field, and generate perspective
+            rgb_in = (rgb_in.squeeze().permute(1, 2, 0)).to(torch.uint8).cpu().numpy()
+            rgb_in = Image.fromarray(rgb_in)
+            # generate 5 image for each perspective field, and generate perspective
             # field for each of them
-            for j in range(10):
+            for j in range(1000):
                 # Predict depth
                 pipe_out: MarigoldOutput = self.model(
                     field_in,
@@ -559,28 +579,40 @@ class MarigoldTrainer:
 
                 image_pred: Image.Image = pipe_out.image
                 field_pred: np.ndarray = pipe_out.field
+                field_visualized: Image.Image = pipe_out.field_visualized
 
                 if save_to_dir is not None:
-                    output_dir_jpg = os.path.join(img_dir, "image_" + str(i))
-                    output_dir_field = os.path.join(field_dir, "field_" + str(i))
-                    os.makedirs(output_dir_jpg, exist_ok=True)
-                    os.makedirs(output_dir_field, exist_ok=True)
-                    
-                    # save image
-                    pred_name_base = str(j) + "_pred"
-                    jpg_save_path = os.path.join(output_dir_jpg, f"{pred_name_base}.jpg")
+
+                    '''
+                    # save original image
+                    pred_name_base = str(index) + "_pred"
+
+                    og_save_path = os.path.join(og_dir, f"{pred_name_base}.jpg")
+                    if os.path.exists(og_save_path):
+                        logging.warning(f"Existing file: '{og_save_path}' will be overwritten")
+                    rgb_in.save(og_save_path)
+
+
+
+                    # save generated
+                    jpg_save_path = os.path.join(gen_dir, f"{pred_name_base}.jpg")
                     if os.path.exists(jpg_save_path):
                         logging.warning(f"Existing file: '{jpg_save_path}' will be overwritten")
                     image_pred.save(jpg_save_path)
+                    '''
 
-                    # Save field
-                    img_np = np.asarray(image_pred)
-                    img_np = torch.as_tensor(img_np.astype("float32").transpose(2, 0, 1))
+
+                   
+                    pred_name_base = str(j) + "_pred"
+
+                    # compute and save actual field
+                    img_np_og = np.asarray(image_pred)
+                    img_np = torch.as_tensor(img_np_og.astype("float32").transpose(2, 0, 1))
                     img_input =  {"image": img_np, "height": img_np.shape[1], "width": img_np.shape[2]}
 
                     field_map = self.pf_model.forward([img_input])[0]
-                    latitude_map = field_map['pred_latitude_original']
-                    gravity_maps = field_map['pred_gravity_original']
+                    latitude_map = field_map['pred_latitude_original'].cpu().detach()
+                    gravity_maps = field_map['pred_gravity_original'].cpu().detach()
                     joined_maps = torch.cat([gravity_maps, latitude_map.unsqueeze(0),], dim = 0)
 
                     field_save_path = os.path.join(output_dir_field, f"{pred_name_base}.pt")
@@ -634,7 +666,7 @@ class MarigoldTrainer:
             start=1,
         ):
 
-            if i >= 10:
+            if i < 443:
                 break 
             
             assert 1 == data_loader.batch_size
