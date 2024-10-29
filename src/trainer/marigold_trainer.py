@@ -621,6 +621,7 @@ class MarigoldTrainer:
                 self.out_dir_vis, self._get_backup_ckpt_name(), vis_dataset_name
             )
             os.makedirs(vis_out_dir, exist_ok=True)
+            print("vis out dir", vis_out_dir)
             _ = self.validate_single_dataset(
                 data_loader=val_loader,
                 metric_tracker=self.val_metrics,
@@ -655,8 +656,8 @@ class MarigoldTrainer:
             # Read input field
             # print(batch)
             field_in = batch["field"].to(self.device).to(torch.float32)
-            rgb_in = batch["image"].to(self.device).to(torch.float32)
-            # [1, 3, H, W]
+            # rgb_in = batch["image"].to(self.device).to(torch.float32) # [1, 3, H, W]
+            prompt_in = batch["prompt"] 
 
             # Random number generator
             seed = val_seed_ls.pop()
@@ -669,6 +670,7 @@ class MarigoldTrainer:
             # Predict depth
             pipe_out: MarigoldOutput = self.model(
                 field_in,
+                input_prompt=prompt_in,
                 denoising_steps=self.cfg.validation.denoising_steps,
                 ensemble_size=self.cfg.validation.ensemble_size,
                 processing_res=self.cfg.validation.processing_res,
