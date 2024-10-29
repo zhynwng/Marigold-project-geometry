@@ -24,6 +24,7 @@
 
 import logging
 import os
+import sys
 import shutil
 from datetime import datetime
 from typing import List, Union
@@ -87,8 +88,8 @@ class MarigoldTrainer:
             self._replace_unet_conv_in_zero_intialization()
 
         # Encode empty text prompt
-        self.model.encode_empty_text()
-        self.empty_text_embed = self.model.empty_text_embed.detach().clone().to(device)
+        # self.model.encode_text()
+        self.text_embed = None #self.model.text_embed.detach().clone().to(device)
 
         self.model.unet.enable_xformers_memory_efficient_attention()
 
@@ -249,6 +250,7 @@ class MarigoldTrainer:
                 # Get data
                 rgb = batch["image"].to(device).to(torch.float32)
                 field = batch["field"].to(device).to(torch.float32)
+                prompt = batch["prompt"]
 
                 # normalize rgb 
                 rgb_norm: torch.Tensor = rgb / 255.0 * 2.0 - 1.0  #  [0, 255] -> [-1, 1]
@@ -301,9 +303,12 @@ class MarigoldTrainer:
                 )  # [B, 4, h, w]
 
                 # Text embedding
-                text_embed = self.empty_text_embed.to(device).repeat(
-                    (batch_size, 1, 1)
-                )  # [B, 77, 1024]
+                self.model.encode_text(prompt)
+                self.text_embed = self.model.text_embed.detach().clone().to(device)
+                text_embed = self.text_embed
+                # text_embed = self.text_embed.to(device).repeat( # uncomment if each image has a same text prompt
+                #     (batch_size, 1, 1)
+                # )  # [B, 77, 1024]
 
                 # Concat field and rgb latents
                 cat_latents = torch.cat(
@@ -322,7 +327,7 @@ class MarigoldTrainer:
                 # Get the target for loss depending on the prediction type
                 if "sample" == self.prediction_type:
                     target = rgb_latent
-                elif "epsilon" == self.prediction_type:
+                elif "epsilon" == self.prediction_type: # loss for conditional model
                     target = noise
                 elif "v_prediction" == self.prediction_type:
                     target = self.training_noise_scheduler.get_velocity(
@@ -331,7 +336,7 @@ class MarigoldTrainer:
                 else:
                     raise ValueError(f"Unknown prediction type {self.prediction_type}")
 
-               
+                
                 latent_loss = self.loss(model_pred.float(), target.float())
 
                 loss = latent_loss.mean()
@@ -495,12 +500,12 @@ class MarigoldTrainer:
                 self.out_dir_vis, self._get_backup_ckpt_name(), vis_dataset_name
             )
             os.makedirs(vis_out_dir, exist_ok=True)
+            print("vis out dir", vis_out_dir)
             _ = self.validate_single_dataset(
                 data_loader=val_loader,
                 metric_tracker=self.val_metrics,
                 save_to_dir=vis_out_dir,
             )
-
 
 
     @torch.no_grad()
@@ -521,13 +526,15 @@ class MarigoldTrainer:
             tqdm(data_loader, desc=f"evaluating on {data_loader.dataset.disp_name}"),
             start=1,
         ):
+            if i > 10:
+                break
             
             assert 1 == data_loader.batch_size
             # Read input field
             # print(batch)
             field_in = batch["field"].to(self.device).to(torch.float32)
-            rgb_in = batch["image"].to(self.device).to(torch.float32)
-            # [1, 3, H, W]
+            rgb_in = batch["image"].to(self.device).to(torch.float32) # [B, 3, H, W]
+            prompt_in = batch['prompt']
 
             # Random number generator
             seed = val_seed_ls.pop()
@@ -540,6 +547,7 @@ class MarigoldTrainer:
             # Predict depth
             pipe_out: MarigoldOutput = self.model(
                 field_in,
+                input_prompt=prompt_in,
                 denoising_steps=self.cfg.validation.denoising_steps,
                 ensemble_size=self.cfg.validation.ensemble_size,
                 processing_res=self.cfg.validation.processing_res,

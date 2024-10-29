@@ -27,6 +27,7 @@ import tarfile
 from enum import Enum
 from typing import Union
 import sys
+import json
 
 import numpy as np
 import torch
@@ -70,6 +71,7 @@ class BaseDepthDataset(Dataset):
         has_filled_depth: bool = False,
         name_mode: DepthFileNameMode = DepthFileNameMode.id,
         depth_transform: Union[DepthNormalizerBase, None] = None,
+        prompt_ls_path: str = None,
         augmentation_args: dict = None,
         resize_to_hw=None,
         move_invalid_to_far_plane: bool = True,
@@ -80,6 +82,7 @@ class BaseDepthDataset(Dataset):
         self.mode = mode
         # dataset info
         self.filename_ls_path = filename_ls_path
+        self.prompt_ls_path = prompt_ls_path
         self.dataset_dir = dataset_dir
         assert os.path.exists(
             self.dataset_dir
@@ -89,6 +92,7 @@ class BaseDepthDataset(Dataset):
         self.name_mode: DepthFileNameMode = name_mode
         self.min_depth = min_depth
         self.max_depth = max_depth
+        self.prompts = None
 
         # training arguments
         self.depth_transform: DepthNormalizerBase = depth_transform
@@ -102,6 +106,9 @@ class BaseDepthDataset(Dataset):
             self.filenames = [
                 s.split() for s in f.readlines()
             ]  # [['rgb.png', 'depth.tif'], [], ...]
+        if self.prompt_ls_path is not None:
+            with open(self.prompt_ls_path, "r") as p:
+                self.prompts = json.load(p)
 
         # Tar dataset
         self.tar_obj = None
@@ -120,11 +127,16 @@ class BaseDepthDataset(Dataset):
 
     def _get_data_item(self, index):
         img_rel_path, field_rel_path, filled_rel_path = self._get_data_path(index=index)
+        prompt_index = img_rel_path.split('/')[-1].split('.')[0]
 
         batch = {}
 
         batch["image"] = self._read_image(img_rel_path)
         batch["field"] = self._read_image(field_rel_path)
+        if self.prompts is not None:
+            batch["prompt"] = self.prompts[prompt_index]
+        else:
+            batch["prompt"] = ""
 
         return batch
 
@@ -166,6 +178,7 @@ class BaseDepthDataset(Dataset):
             depth_rel_path = filename_line[1]
             if self.has_filled_depth:
                 filled_rel_path = filename_line[2]
+
         return rgb_rel_path, depth_rel_path, filled_rel_path
 
     def _read_image(self, img_rel_path) -> np.ndarray:

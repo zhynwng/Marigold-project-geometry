@@ -124,6 +124,7 @@ if "__main__" == __name__:
     if resume_run is not None:
         print(f"Resume run: {resume_run}")
         out_dir_run = os.path.dirname(os.path.dirname(resume_run))
+        # out_dir_run = os.path.join(out_dir_run, "conditional_prompt")
         job_name = os.path.basename(out_dir_run)
         # Resume config file
         cfg = OmegaConf.load(os.path.join(out_dir_run, "config.yaml"))
@@ -148,7 +149,7 @@ if "__main__" == __name__:
     cfg_data = cfg.dataset
 
     # Other directories
-    out_dir_ckpt = os.path.join(out_dir_run, "checkpoint")
+    out_dir_ckpt = out_dir_run # os.path.join(out_dir_run, "checkpoint")
     if not os.path.exists(out_dir_ckpt):
         os.makedirs(out_dir_ckpt)
     out_dir_tb = os.path.join(out_dir_run, "tensorboard")

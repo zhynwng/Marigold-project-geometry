@@ -59,6 +59,7 @@ def get_dataset(
         dataset = dataset_class(
             mode=mode,
             filename_ls_path=cfg_data_split.filenames,
+            prompt_ls_path=cfg_data_split.promptlist,
             dataset_dir=os.path.join(base_data_dir, cfg_data_split.dir),
             **cfg_data_split,
             **kwargs,
