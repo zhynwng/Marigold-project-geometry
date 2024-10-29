@@ -98,7 +98,16 @@ class MarigoldTrainer:
         # Trainability
         self.model.vae.requires_grad_(False)
         self.model.text_encoder.requires_grad_(False)
-        self.model.unet.requires_grad_(True)
+        self.model.unet.requires_grad_(False)
+
+        # only train last two layers of the unet
+        for param in self.model.unet.conv_in.parameters():
+            param.requires_grad = True
+
+        
+        #for param in self.model.unet.up_blocks[3].parameters():
+        #    param.requires_grad = True
+            
 
         # Optimizer !should be defined after input layer is adapted
         lr = self.cfg.lr
@@ -237,7 +246,7 @@ class MarigoldTrainer:
         self.train_metrics.reset()
         accumulated_step = 0
 
-        self.visualize_contrastive()
+        # self.visualize_contrastive()
 
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
@@ -266,7 +275,7 @@ class MarigoldTrainer:
                     # Encode field depth
                     field_latent = self.model.encode_field(field)  # [B, 4, h, w]
 
-                num_inference_steps = 15
+                num_inference_steps = 50
 
                 self.model.scheduler.set_timesteps(num_inference_steps, device=device)
                 timesteps = self.model.scheduler.timesteps
