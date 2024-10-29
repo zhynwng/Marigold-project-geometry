@@ -90,8 +90,8 @@ class MarigoldTrainer:
             self._replace_unet_conv_in_zero_intialization()
 
         # Encode empty text prompt
-        self.model.encode_empty_text()
-        self.empty_text_embed = self.model.empty_text_embed.detach().clone().to(device)
+        # self.model.encode_text()
+        self.text_embed = None #self.model.text_embed.detach().clone().to(device)
 
         self.model.unet.enable_xformers_memory_efficient_attention()
 
@@ -103,6 +103,7 @@ class MarigoldTrainer:
         # only train last two layers of the unet
         for param in self.model.unet.conv_in.parameters():
             param.requires_grad = True
+        logging.info("Unet is only updating last two layers")
 
         
         #for param in self.model.unet.up_blocks[3].parameters():
@@ -246,7 +247,7 @@ class MarigoldTrainer:
         self.train_metrics.reset()
         accumulated_step = 0
 
-        # self.visualize_contrastive()
+        self.visualize()
 
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
@@ -268,6 +269,7 @@ class MarigoldTrainer:
 
                 # We just need the perspective field
                 field = batch["field"].to(device).to(torch.float32)
+                prompt = batch["prompt"]
 
 
                 batch_size = field.shape[0]
@@ -275,7 +277,7 @@ class MarigoldTrainer:
                     # Encode field depth
                     field_latent = self.model.encode_field(field)  # [B, 4, h, w]
 
-                num_inference_steps = 50
+                num_inference_steps = 40
 
                 self.model.scheduler.set_timesteps(num_inference_steps, device=device)
                 timesteps = self.model.scheduler.timesteps
@@ -288,9 +290,12 @@ class MarigoldTrainer:
                 )  # [B, 4, h, w]
 
                 # Text embedding
-                text_embed = self.empty_text_embed.to(device).repeat(
-                    (batch_size, 1, 1)
-                )  # [B, 77, 1024]
+                self.model.encode_text(prompt)
+                self.text_embed = self.model.text_embed.detach().clone().to(device)
+                text_embed = self.text_embed.to(device)
+                # text_embed = self.text_embed.to(device).repeat(
+                #     (batch_size, 1, 1)
+                # )  # [B, 77, 1024]
 
                 guidance_scale = 7.5
 
@@ -536,9 +541,8 @@ class MarigoldTrainer:
             assert 1 == data_loader.batch_size
             # Read input field
             # print(batch)
-            field_in = batch["field"].to(self.device).to(torch.float32)
-            rgb_in = batch["image"].to(self.device).to(torch.float32)
-            # [1, 3, H, W]
+            field_in = batch["field"].to(self.device).to(torch.float32) # [1, 3, H, W]
+            prompt_in = batch['prompt']
 
         
             # Random number generator
@@ -555,6 +559,7 @@ class MarigoldTrainer:
                 # Predict depth
                 pipe_out: MarigoldOutput = self.model(
                     field_in,
+                    input_prompt=prompt_in,
                     denoising_steps=self.cfg.validation.denoising_steps,
                     ensemble_size=self.cfg.validation.ensemble_size,
                     processing_res=self.cfg.validation.processing_res,

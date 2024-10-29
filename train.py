@@ -148,7 +148,7 @@ if "__main__" == __name__:
     cfg_data = cfg.dataset
 
     # Other directories
-    out_dir_ckpt = os.path.join(out_dir_run, "checkpoint")
+    out_dir_ckpt = out_dir_run #os.path.join(out_dir_run, "checkpoint")
     if not os.path.exists(out_dir_ckpt):
         os.makedirs(out_dir_ckpt)
     out_dir_tb = os.path.join(out_dir_run, "tensorboard")

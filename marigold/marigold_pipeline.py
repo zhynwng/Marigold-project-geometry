@@ -144,12 +144,13 @@ class MarigoldPipeline(DiffusionPipeline):
         self.default_denoising_steps = default_denoising_steps
         self.default_processing_resolution = default_processing_resolution
 
-        self.empty_text_embed = None
+        self.text_embed = None
 
     @torch.no_grad()
     def __call__(
         self,
         input_field: torch.Tensor ,
+        input_prompt: Optional[str] = None,
         denoising_steps: Optional[int] = None,
         ensemble_size: int = 5,
         processing_res: Optional[int] = None,
@@ -262,6 +263,7 @@ class MarigoldPipeline(DiffusionPipeline):
             (batched_field,) = batch
             rgb_pred_raw = self.single_infer(
                 field_in=batched_field,
+                prompt_in=input_prompt,
                 num_inference_steps=denoising_steps,
                 show_pbar=show_progress_bar,
                 generator=generator,
@@ -305,11 +307,12 @@ class MarigoldPipeline(DiffusionPipeline):
                     f"Non-optimal setting of denoising steps: {n_step}. Recommended setting is 1-4 steps."
                 )
 
-    def encode_empty_text(self):
+    def encode_text(self, prompt=None):
         """
-        Encode text embedding for empty prompt
+        Encode text embedding for prompt
         """
-        prompt = "a realistic photo of an indoor room"
+        if prompt is None:
+            prompt = "a realistic photo of an indoor room"
         text_inputs = self.tokenizer(prompt, 
             padding="max_length", 
             max_length= self.tokenizer.model_max_length, 
@@ -317,7 +320,8 @@ class MarigoldPipeline(DiffusionPipeline):
             return_tensors="pt")
 
         text_input_ids = text_inputs.input_ids.to(self.text_encoder.device)
-        self.empty_text_embed = self.text_encoder(text_input_ids)[0].to(self.dtype)
+        with torch.no_grad():
+            self.text_embed = self.text_encoder(text_input_ids)[0].to(self.dtype)
 
     @torch.no_grad()
     def single_infer(
@@ -326,6 +330,7 @@ class MarigoldPipeline(DiffusionPipeline):
         num_inference_steps: int,
         generator: Union[torch.Generator, None],
         show_pbar: bool,
+        prompt_in: str = None,
     ) -> torch.Tensor:
         """
         Perform an individual depth prediction without ensembling.
@@ -363,9 +368,9 @@ class MarigoldPipeline(DiffusionPipeline):
         )  # [B, 4, h, w]
 
         # Batched empty text embedding
-        if self.empty_text_embed is None:
-            self.encode_empty_text()
-        batch_empty_text_embed = self.empty_text_embed.repeat(
+        # if self.text_embed is None:
+        self.encode_text(prompt_in)
+        batch_text_embed = self.text_embed.repeat(
             (rgb_latent.shape[0], 1, 1)
         ).to(device)  # [B, 2, 1024]
 
@@ -376,7 +381,7 @@ class MarigoldPipeline(DiffusionPipeline):
         )
         with torch.no_grad():
             uncond_embeddings = self.text_encoder(uncond_input.input_ids.to(device))[0]  
-        text_embeddings = torch.cat([uncond_embeddings, batch_empty_text_embed])
+        text_embeddings = torch.cat([uncond_embeddings, batch_text_embed])
 
         # Denoising loop
         if show_pbar:
