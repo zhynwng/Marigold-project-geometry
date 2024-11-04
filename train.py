@@ -254,16 +254,16 @@ if "__main__" == __name__:
         loader_generator = torch.Generator().manual_seed(loader_seed)
 
     # Training dataset
-    depth_transform: DepthNormalizerBase = get_depth_normalizer(
-        cfg_normalizer=cfg.depth_normalization
-    )
+    # depth_transform: DepthNormalizerBase = get_depth_normalizer(
+    #     cfg_normalizer=cfg.depth_normalization
+    # )
     print(cfg_data.train)
     train_dataset: BaseDepthDataset = get_dataset(
         cfg_data.train,
         base_data_dir=base_data_dir,
         mode=DatasetMode.TRAIN,
         augmentation_args=cfg.augmentation,
-        depth_transform=depth_transform,
+        depth_transform=None, #depth_transform,
     )
     logging.debug("Augmentation: ", cfg.augmentation)
     if "mixed" == cfg_data.train.name:
@@ -328,7 +328,7 @@ if "__main__" == __name__:
     # -------------------- Model --------------------
     _pipeline_kwargs = cfg.pipeline.kwargs if cfg.pipeline.kwargs is not None else {}
     model = SDXLPipeline.from_pretrained(
-        os.path.join(base_ckpt_dir, cfg.model.pretrained_path), **_pipeline_kwargs, addition_embed_type = None, #variant=variant, torch_dtype=dtype, use_safetensors=True
+        os.path.join(base_ckpt_dir, cfg.model.pretrained_path), **_pipeline_kwargs, addition_embed_type = None, torch_dtype=torch.float32, #variant=variant, use_safetensors=True
     )
 
     # -------------------- Trainer --------------------

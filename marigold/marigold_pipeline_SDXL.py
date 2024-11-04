@@ -21,6 +21,7 @@
 
 import logging
 from typing import Dict, Optional, Union
+import sys
 
 import numpy as np
 import torch
@@ -214,6 +215,7 @@ class SDXLPipeline(
     def __call__(
         self,
         input_field: Union[Image.Image, torch.Tensor, None],
+        input_prompt: Optional[str] = None,
         denoising_steps: Optional[int] = None,
         ensemble_size: int = 5,
         processing_res: Optional[int] = None,
@@ -323,6 +325,7 @@ class SDXLPipeline(
             (batched_field,) = batch
             image_pred = self.single_infer(
                 field_in=batched_field,
+                prompt_in=input_prompt,
                 num_inference_steps=denoising_steps,
                 show_pbar=show_progress_bar,
                 generator=generator,
@@ -353,21 +356,37 @@ class SDXLPipeline(
 
 
     @torch.no_grad()
-    def encode_prompt(self):
+    def encode_prompt(self, prompt=None):
         """
         Encode text embedding for a given prompt
         """
         num_images_per_prompt = 1
         device = self.device
-        prompt = "a realistic picture of an indoor room"
-        prompt = [prompt]
-        batch_size = 1
+        if prompt is None:
+            prompt = "a photograph of an indoor room"
+        if not isinstance(prompt, list):
+            prompt = [prompt]
 
         # Define tokenizers and text encoders
         tokenizers = [self.tokenizer, self.tokenizer_2]
         text_encoders = (
             [self.text_encoder, self.text_encoder_2]
         )
+        
+        # ad hoc solution
+        pooled_prompt = "a photograph of an indoor room"
+        text_inputs = self.tokenizer_2(
+            pooled_prompt,
+            padding="max_length",
+            max_length= self.tokenizer_2.model_max_length,
+            truncation=True,
+            return_tensors="pt",
+        )
+        text_input_ids = text_inputs.input_ids
+        with torch.no_grad():
+            prompt_embeds = self.text_encoder_2(text_input_ids.to(device), output_hidden_states=True)
+        pooled_prompt_embeds = prompt_embeds[0]
+        # ad hoc solution ends
 
         prompt_2 = prompt
         # textual inversion: process multi-vector tokens if necessary
@@ -383,23 +402,23 @@ class SDXLPipeline(
             )
 
             text_input_ids = text_inputs.input_ids
-            untruncated_ids = tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
+            # untruncated_ids = tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
 
-            if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(
-                text_input_ids, untruncated_ids
-            ):
-                removed_text = tokenizer.batch_decode(untruncated_ids[:, tokenizer.model_max_length - 1 : -1])
+            # if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(
+            #     text_input_ids, untruncated_ids
+            # ):
+            #     removed_text = tokenizer.batch_decode(untruncated_ids[:, tokenizer.model_max_length - 1 : -1])
 
-            prompt_embeds = text_encoder(text_input_ids.to(device), output_hidden_states=True)
+            with torch.no_grad():
+                prompt_embeds = text_encoder(text_input_ids.to(device), output_hidden_states=True)
 
             # We are only ALWAYS interested in the pooled output of the final text encoder
-            pooled_prompt_embeds = prompt_embeds[0]
+            # pooled_prompt_embeds = prompt_embeds[0]
 
             prompt_embeds = prompt_embeds.hidden_states[-2]
             prompt_embeds_list.append(prompt_embeds)
 
         prompt_embeds = torch.concat(prompt_embeds_list, dim=-1)
-
 
         if self.text_encoder_2 is not None:
             prompt_embeds = prompt_embeds.to(dtype=self.text_encoder_2.dtype, device=device)
@@ -410,7 +429,8 @@ class SDXLPipeline(
         prompt_embeds = prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
 
         pooled_prompt_embeds = pooled_prompt_embeds.repeat(1, num_images_per_prompt).view(
-            bs_embed * num_images_per_prompt, -1
+            #bs_embed * num_images_per_prompt, -1
+            1,-1
         )
 
         self.prompt_embeds = prompt_embeds
@@ -454,6 +474,7 @@ class SDXLPipeline(
         num_inference_steps: int,
         generator: Union[torch.Generator, None],
         show_pbar: bool,
+        prompt_in: str = None,
     ) -> torch.Tensor:
         """
         Perform an individual depth prediction without ensembling.
@@ -476,6 +497,9 @@ class SDXLPipeline(
         # encode field 
         field_latent = self.encode_field(field_in)
 
+        # if self.prompt_embeds is None:
+        self.encode_prompt(prompt_in)
+        self.get_time_ids()
 
         # Set time steps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
@@ -484,11 +508,6 @@ class SDXLPipeline(
         latents = torch.randn(field_latent.shape, generator=generator, device=device, dtype=self.prompt_embeds.dtype)
         # scale the initial noise by the standard deviation required by the scheduler
         latents = latents * self.scheduler.init_noise_sigma
-
-
-        if self.prompt_embeds is None:
-            self.encode_prompt()
-            self.get_time_ids()
 
         if show_pbar:
             iterable = tqdm(

@@ -31,6 +31,8 @@ from typing import List, Union
 
 import numpy as np
 import torch
+from accelerate import Accelerator
+from peft import LoraConfig, set_peft_model_state_dict
 from diffusers import DDPMScheduler
 from omegaconf import OmegaConf
 from torch.nn import Conv2d
@@ -41,7 +43,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from PIL import Image
 
-from marigold.marigold_pipeline import MarigoldPipeline, MarigoldOutput
+# from marigold.marigold_pipeline import MarigoldPipeline, MarigoldOutput
 from marigold.marigold_pipeline_SDXL import SDXLPipeline, SDXLOutput
 from src.util import metric
 from src.util.data_loader import skip_first_batches
@@ -70,7 +72,7 @@ class SDXLTrainer:
         vis_dataloaders: List[DataLoader] = None,
     ):
         self.cfg: OmegaConf = cfg
-        self.model: MarigoldPipeline = model
+        self.model: SDXLPipeline = model
         self.device = device
         self.seed: Union[int, None] = (
             self.cfg.trainer.init_seed
@@ -88,8 +90,8 @@ class SDXLTrainer:
             self._replace_unet_conv_in_zero_intialization()
 
         # Encode empty text prompt
-        self.model.encode_prompt()
-        self.model.get_time_ids()
+        # self.model.encode_prompt()
+        # self.model.get_time_ids()
 
         self.model.unet.enable_xformers_memory_efficient_attention()
 
@@ -97,7 +99,20 @@ class SDXLTrainer:
         self.model.vae.requires_grad_(False)
         self.model.text_encoder.requires_grad_(False)
         self.model.text_encoder_2.requires_grad_(False)
-        self.model.unet.requires_grad_(True)
+        self.model.unet.train()
+        self.model.unet.to(dtype=torch.float32)
+        # self.model.unet.requires_grad_(False)
+
+        # Add new LoRA weights to the attention layers
+        # Set correct lora layers
+        unet_lora_config = LoraConfig(
+            r=4, # hardcode
+            lora_alpha=4, # hardcode
+            init_lora_weights="gaussian",
+            target_modules=["to_k", "to_q", "to_v", "to_out.0"],
+        )
+
+        self.model.unet.add_adapter(unet_lora_config)
         
         # Optimizer !should be defined after input layer is adapted
         lr = self.cfg.lr
@@ -168,6 +183,17 @@ class SDXLTrainer:
         self.effective_iter = 0  # how many times optimizer.step() is called
         self.in_evaluation = False
         self.global_seed_sequence: List = []  # consistent global seed sequence, used to seed random generator, to ensure consistency when resuming
+
+        # accelerator = Accelerator(
+        #     gradient_accumulation_steps=self.gradient_accumulation_steps,
+        #     mixed_precision="no",
+        #     log_with="tensorboard",
+        #     # project_config=accelerator_project_config,
+        # )
+
+        # # Disable AMP for MPS.
+        # if torch.backends.mps.is_available():
+        #     accelerator.native_amp = False
 
     def _replace_unet_conv_in(self):
         # replace the first layer to accept 8 in_channels
@@ -253,7 +279,7 @@ class SDXLTrainer:
 
             # Skip previous batches when resume
             for batch in skip_first_batches(self.train_loader, self.n_batch_in_epoch):
-                self.model.unet.train()
+                # self.model.unet.train()
 
                 # globally consistent random generators
                 if self.seed is not None:
@@ -268,6 +294,7 @@ class SDXLTrainer:
                 # Get data
                 rgb = batch["image"].to(device).to(torch.float32)
                 field = batch["field"].to(device).to(torch.float32)
+                prompt = batch["prompt"]
 
                 # normalize rgb 
                 rgb_norm: torch.Tensor = rgb / 255.0 * 2.0 - 1.0  #  [0, 255] -> [-1, 1]
@@ -317,9 +344,12 @@ class SDXLTrainer:
                 )  # [B, 4, h, w]
 
                 # Text embedding
-                text_embed = self.model.prompt_embeds.to(device).repeat(
-                    (batch_size, 1, 1)
-                )  # [B, 77, 1024]
+                self.model.encode_prompt(prompt)
+                self.model.get_time_ids()
+                text_embed = self.model.prompt_embeds.to(device)
+                # text_embed = self.model.prompt_embeds.to(device).repeat(
+                #     (batch_size, 1, 1)
+                # )  # [B, 77, 1024]
 
                 added_cond_kwargs = {"text_embeds": self.model.add_text_embeds.to(device), "time_ids": self.model.add_time_ids.to(device)}
 
@@ -332,7 +362,6 @@ class SDXLTrainer:
                 # Predict the noise residual
                 model_pred = self.model.unet(
                     cat_latents, timesteps, text_embed, added_cond_kwargs=added_cond_kwargs,return_dict=False,
-
                 )[0]  # [B, 4, h, w]
 
                 if torch.isnan(model_pred).any():
@@ -533,17 +562,21 @@ class SDXLTrainer:
         val_init_seed = self.cfg.validation.init_seed
         val_seed_ls = generate_seed_sequence(val_init_seed, len(data_loader))
 
-        for i, batch in enumerate(data_loader):
+        for i, batch in enumerate(
+            tqdm(data_loader, desc=f"evaluating on {data_loader.dataset.disp_name}"),
+            start=1,
+        ):
 
-            if i == 10:
+            if i >= 10:
                 break
             
             # assert 1 == data_loader.batch_size
             # Read input field
             # print(batch)
-            rgb_in = batch["image"].to(self.device).to(torch.float32)[:1]
+            # rgb_in = batch["image"].to(self.device).to(torch.float32)[:1]
             field_in = batch["field"].to(self.device).to(torch.float32)[:1]
             # [1, 3, H, W]
+            prompt_in = batch['prompt']
 
             # Random number generator
             seed = val_seed_ls.pop()
@@ -554,8 +587,9 @@ class SDXLTrainer:
                 generator.manual_seed(seed)
 
             # Predict image
-            pipe_out: MarigoldOutput = self.model(
+            pipe_out: SDXLOutput = self.model(
                 field_in,
+                input_prompt=prompt_in,
                 denoising_steps=self.cfg.validation.denoising_steps,
                 ensemble_size=self.cfg.validation.ensemble_size,
                 processing_res=self.cfg.validation.processing_res,
