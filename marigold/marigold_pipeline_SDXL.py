@@ -532,7 +532,6 @@ class SDXLPipeline(
             # predict the noise residual
             added_cond_kwargs = {"text_embeds": self.add_text_embeds, "time_ids": self.add_time_ids}
 
-
             noise_pred = self.unet(
                 latent_model_input,
                 t,

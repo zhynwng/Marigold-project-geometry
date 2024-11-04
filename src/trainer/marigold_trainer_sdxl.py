@@ -542,7 +542,7 @@ class SDXLTrainer:
         )
         os.makedirs(vis_out_dir, exist_ok=True)
         _ = self.validate_single_dataset(
-            data_loader=self.train_loader,
+            data_loader=self.vis_loaders[0],
             metric_tracker=self.val_metrics,
             save_to_dir=vis_out_dir,
         )
