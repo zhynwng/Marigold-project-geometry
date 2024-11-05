@@ -32,7 +32,6 @@ from typing import List, Union
 import numpy as np
 import torch
 from accelerate import Accelerator
-from peft import LoraConfig, set_peft_model_state_dict
 from diffusers import DDPMScheduler
 from omegaconf import OmegaConf
 from torch.nn import Conv2d
@@ -99,21 +98,12 @@ class SDXLTrainer:
         self.model.vae.requires_grad_(False)
         self.model.text_encoder.requires_grad_(False)
         self.model.text_encoder_2.requires_grad_(False)
-        self.model.unet.train()
-        self.model.unet.to(dtype=torch.float32)
-        # self.model.unet.requires_grad_(False)
+        self.model.unet.requires_grad_(False)
 
-        # Add new LoRA weights to the attention layers
-        # Set correct lora layers
-        unet_lora_config = LoraConfig(
-            r=4, # hardcode
-            lora_alpha=4, # hardcode
-            init_lora_weights="gaussian",
-            target_modules=["to_k", "to_q", "to_v", "to_out.0"],
-        )
+        # only train first two layers of the unet
+        for param in self.model.unet.conv_in.parameters():
+            param.requires_grad = True
 
-        self.model.unet.add_adapter(unet_lora_config)
-        
         # Optimizer !should be defined after input layer is adapted
         lr = self.cfg.lr
         self.optimizer = Adam(self.model.unet.parameters(), lr=lr)
@@ -271,7 +261,7 @@ class SDXLTrainer:
         self.train_metrics.reset()
         accumulated_step = 0
 
-        self.visualize()
+        #self.visualize()
 
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
@@ -310,9 +300,10 @@ class SDXLTrainer:
                     field_latent = self.model.encode_field(field)  # [B, 4, h, w]
 
                 # Sample a random timestep for each image
+                upper_timestep = int(0.2 * self.scheduler_timesteps)
                 timesteps = torch.randint(
                     0,
-                    self.scheduler_timesteps,
+                    upper_timestep,
                     (batch_size,),
                     device=device,
                     generator=rand_num_generator,
@@ -563,8 +554,7 @@ class SDXLTrainer:
         val_seed_ls = generate_seed_sequence(val_init_seed, len(data_loader))
 
         for i, batch in enumerate(
-            tqdm(data_loader, desc=f"evaluating on {data_loader.dataset.disp_name}"),
-            start=1,
+            tqdm(data_loader, desc=f"evaluating on {data_loader.dataset.disp_name}")
         ):
 
             if i >= 10:
