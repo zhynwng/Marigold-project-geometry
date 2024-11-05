@@ -259,10 +259,13 @@ class MarigoldTrainer:
                     # Encode field depth
                     field_latent = self.model.encode_field(field)  # [B, 4, h, w]
 
+                # only train late stages of the timestep
+                upper_timestep = int(0.2 * self.scheduler_timesteps)
+
                 # Sample a random timestep for each image
                 timesteps = torch.randint(
                     0,
-                    self.scheduler_timesteps,
+                    upper_timestep
                     (batch_size,),
                     device=device,
                     generator=rand_num_generator,
