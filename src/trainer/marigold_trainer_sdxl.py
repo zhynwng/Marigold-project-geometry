@@ -288,10 +288,11 @@ class SDXLTrainer:
                     # Encode field depth
                     field_latent = self.model.encode_field(field)  # [B, 4, h, w]
 
+                upper_timestep = int(0.5 * self.scheduler_timesteps)
                 # Sample a random timestep for each image
                 timesteps = torch.randint(
                     0,
-                    self.scheduler_timesteps,
+                    upper_timestep,
                     (batch_size,),
                     device=device,
                     generator=rand_num_generator,
@@ -541,7 +542,7 @@ class SDXLTrainer:
 
         for i, batch in enumerate(data_loader):
 
-            if i == 10:
+            if i == 400:
                 break
             
             # assert 1 == data_loader.batch_size
@@ -668,10 +669,8 @@ class SDXLTrainer:
     ):
         logging.info(f"Loading checkpoint from: {ckpt_path}")
         # Load UNet
-        _model_path = os.path.join(ckpt_path, "unet", "diffusion_pytorch_model.bin")
-        self.model.unet.load_state_dict(
-            torch.load(_model_path, map_location=self.device)
-        )
+        _model_path = os.path.join(ckpt_path, "unet")
+        self.model.unet.from_pretrained( _model_path)
         self.model.unet.to(self.device)
         logging.info(f"UNet parameters are loaded from {_model_path}")
 
