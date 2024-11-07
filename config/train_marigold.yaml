@@ -59,7 +59,7 @@ loss:
   kwargs:
     reduction: mean
 
-lr: 3.0e-05
+lr: 2.0e-05
 lr_scheduler:
   name: IterExponential
   kwargs:

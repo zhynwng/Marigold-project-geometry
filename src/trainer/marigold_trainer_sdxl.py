@@ -55,6 +55,10 @@ from src.util.multi_res_noise import multi_res_noise_like
 from src.util.alignment import align_depth_least_square
 from src.util.seeding import generate_seed_sequence
 
+from diffusers import UNet2DConditionModel
+
+from safetensors import safe_open
+
 
 class SDXLTrainer:
     def __init__(
@@ -101,18 +105,25 @@ class SDXLTrainer:
         self.model.text_encoder_2.requires_grad_(False)
         self.model.unet.train()
         self.model.unet.to(dtype=torch.float32)
-        # self.model.unet.requires_grad_(False)
 
+
+        self.model.unet.requires_grad_(False)
+
+        '''
         # Add new LoRA weights to the attention layers
         # Set correct lora layers
         unet_lora_config = LoraConfig(
-            r=4, # hardcode
+            r=256, # hardcode
             lora_alpha=4, # hardcode
             init_lora_weights="gaussian",
             target_modules=["to_k", "to_q", "to_v", "to_out.0"],
         )
 
         self.model.unet.add_adapter(unet_lora_config)
+
+        ''' 
+        for param in self.model.unet.conv_in.parameters():
+            param.requires_grad = True
         
         # Optimizer !should be defined after input layer is adapted
         lr = self.cfg.lr
@@ -271,7 +282,7 @@ class SDXLTrainer:
         self.train_metrics.reset()
         accumulated_step = 0
 
-        self.visualize()
+        self.visualize(1000)
 
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
@@ -310,9 +321,11 @@ class SDXLTrainer:
                     field_latent = self.model.encode_field(field)  # [B, 4, h, w]
 
                 # Sample a random timestep for each image
+                upper_timestep = int(0.5 * self.scheduler_timesteps)
+
                 timesteps = torch.randint(
                     0,
-                    self.scheduler_timesteps,
+                    upper_timestep,
                     (batch_size,),
                     device=device,
                     generator=rand_num_generator,
@@ -536,12 +549,13 @@ class SDXLTrainer:
 
     '''
 
-    def visualize(self):
+    def visualize(self, num = 10):
         vis_out_dir = os.path.join(
             self.out_dir_vis, self._get_backup_ckpt_name()
         )
         os.makedirs(vis_out_dir, exist_ok=True)
         _ = self.validate_single_dataset(
+            num = num
             data_loader=self.vis_loaders[0],
             metric_tracker=self.val_metrics,
             save_to_dir=vis_out_dir,
@@ -551,6 +565,7 @@ class SDXLTrainer:
     @torch.no_grad()
     def validate_single_dataset(
         self,
+        num,
         data_loader: DataLoader,
         metric_tracker: MetricTracker,
         save_to_dir: str = None,
@@ -567,7 +582,7 @@ class SDXLTrainer:
             start=1,
         ):
 
-            if i >= 10:
+            if i >= num:
                 break
             
             # assert 1 == data_loader.batch_size
@@ -663,7 +678,8 @@ class SDXLTrainer:
 
         # Save UNet
         unet_path = os.path.join(ckpt_dir, "unet")
-        self.model.unet.save_pretrained(unet_path, safe_serialization=False)
+        self.model.unet.save_pretrained(unet_path)
+        
         logging.info(f"UNet is saved to: {unet_path}")
 
         if save_train_state:
@@ -696,10 +712,20 @@ class SDXLTrainer:
     ):
         logging.info(f"Loading checkpoint from: {ckpt_path}")
         # Load UNet
-        _model_path = os.path.join(ckpt_path, "unet", "diffusion_pytorch_model.bin")
-        self.model.unet.load_state_dict(
-            torch.load(_model_path, map_location=self.device)
-        )
+        _model_path = os.path.join(ckpt_path, "unet")
+
+        dict_1 = os.path.join(_model_path, "diffusion_pytorch_model-00001-of-00002.safetensors")
+        dict_2 = os.path.join(_model_path, "diffusion_pytorch_model-00002-of-00002.safetensors")
+        dict_list = [dict_1, dict_2]
+        unet_state_dict = {}
+        for dict_path in dict_list:
+            part_dict = {}
+            with safe_open(dict_path, framework="pt", device="cpu") as f:
+                for k in f.keys():
+                    part_dict[k] = f.get_tensor(k)
+            unet_state_dict.update(part_dict)
+        
+        self.model.unet.load_state_dict(unet_state_dict)
         self.model.unet.to(self.device)
         logging.info(f"UNet parameters are loaded from {_model_path}")
 

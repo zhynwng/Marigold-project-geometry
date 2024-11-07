@@ -436,6 +436,10 @@ class SDXLPipeline(
         self.prompt_embeds = prompt_embeds
         self.pooled_prompt_embeds = pooled_prompt_embeds.to(device)
 
+        # get unconditional embeddings for classifier free guidance
+        self.negative_prompt_embeds = torch.zeros_like(prompt_embeds).to(device)
+        self.negative_pooled_prompt_embeds = torch.zeros_like(pooled_prompt_embeds).to(device)
+
 
 
     @torch.no_grad()
@@ -465,6 +469,7 @@ class SDXLPipeline(
             )
 
         self.add_time_ids = torch.tensor([add_time_ids], dtype=self.prompt_embeds.dtype).to(device)
+        self.negative_add_time_ids = self.add_time_ids
 
 
     @torch.no_grad()
@@ -494,6 +499,7 @@ class SDXLPipeline(
         device = self.device
         batch_size = field_in.shape[0]
 
+        guidance_scale = 5.0
         # encode field 
         field_latent = self.encode_field(field_in)
 
@@ -523,23 +529,31 @@ class SDXLPipeline(
         self.add_time_ids = self.add_time_ids.to(device)
         self.prompt_embeds = self.prompt_embeds.to(device)
 
+        prompt_embeds = torch.cat([self.negative_prompt_embeds.to(device), self.prompt_embeds], dim=0)
+        add_text_embeds = torch.cat([self.negative_pooled_prompt_embeds.to(device), self.add_text_embeds], dim=0)
+        add_time_ids = torch.cat([self.negative_add_time_ids.to(device), self.add_time_ids], dim=0)
 
         for i, t in iterable:
             # expand the latents if we are doing classifier free guidance
             latent_model_input = torch.cat([field_latent, latents], dim=1)
+            latent_model_input = torch.cat([latent_model_input] * 2)
             latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
             # predict the noise residual
-            added_cond_kwargs = {"text_embeds": self.add_text_embeds, "time_ids": self.add_time_ids}
+            added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
 
             noise_pred = self.unet(
                 latent_model_input,
                 t,
-                encoder_hidden_states= self.prompt_embeds,
+                encoder_hidden_states= prompt_embeds,
                 cross_attention_kwargs= None,
                 added_cond_kwargs=added_cond_kwargs,
                 return_dict=False,
             )[0]
+
+            # guidance 
+            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
             # compute the previous noisy sample x_t -> x_t-1
             latents_dtype = latents.dtype
