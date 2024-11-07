@@ -105,6 +105,12 @@ if "__main__" == __name__:
         action="store_true",
         help="Add datetime to the output folder name",
     )
+    parser.add_argument(
+        "--lora_rank",
+        type=int,
+        default=None,
+        help="rank in LoRA",
+    )
 
     args = parser.parse_args()
     resume_run = args.resume_run
@@ -353,6 +359,7 @@ if "__main__" == __name__:
         accumulation_steps=accumulation_steps,
         val_dataloaders=None, # val_loaders,
         vis_dataloaders=vis_loaders,
+        lora_rank=args.lora_rank,
     )
 
     # -------------------- Checkpoint --------------------

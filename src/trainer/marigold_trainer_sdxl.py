@@ -42,6 +42,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from PIL import Image
+from torcheval.metrics import FrechetInceptionDistance
 
 # from marigold.marigold_pipeline import MarigoldPipeline, MarigoldOutput
 from marigold.marigold_pipeline_SDXL import SDXLPipeline, SDXLOutput
@@ -74,6 +75,7 @@ class SDXLTrainer:
         accumulation_steps: int,
         val_dataloaders: List[DataLoader] = None,
         vis_dataloaders: List[DataLoader] = None,
+        lora_rank: Optional[int] = None,
     ):
         self.cfg: OmegaConf = cfg
         self.model: SDXLPipeline = model
@@ -88,6 +90,10 @@ class SDXLTrainer:
         self.val_loaders: List[DataLoader] = val_dataloaders
         self.vis_loaders: List[DataLoader] = vis_dataloaders
         self.accumulation_steps: int = accumulation_steps
+        if lora_rank is not None:
+            self.lorarank = lora_rank
+        else:
+            self.lorarank = 32
 
         # Adapt input layers
         if 8 != self.model.unet.config["in_channels"]:
@@ -109,11 +115,11 @@ class SDXLTrainer:
 
         self.model.unet.requires_grad_(False)
 
-        '''
+        
         # Add new LoRA weights to the attention layers
         # Set correct lora layers
         unet_lora_config = LoraConfig(
-            r=256, # hardcode
+            r=self.lorarank,
             lora_alpha=4, # hardcode
             init_lora_weights="gaussian",
             target_modules=["to_k", "to_q", "to_v", "to_out.0"],
@@ -121,7 +127,7 @@ class SDXLTrainer:
 
         self.model.unet.add_adapter(unet_lora_config)
 
-        ''' 
+        
         for param in self.model.unet.conv_in.parameters():
             param.requires_grad = True
         
@@ -194,17 +200,6 @@ class SDXLTrainer:
         self.effective_iter = 0  # how many times optimizer.step() is called
         self.in_evaluation = False
         self.global_seed_sequence: List = []  # consistent global seed sequence, used to seed random generator, to ensure consistency when resuming
-
-        # accelerator = Accelerator(
-        #     gradient_accumulation_steps=self.gradient_accumulation_steps,
-        #     mixed_precision="no",
-        #     log_with="tensorboard",
-        #     # project_config=accelerator_project_config,
-        # )
-
-        # # Disable AMP for MPS.
-        # if torch.backends.mps.is_available():
-        #     accelerator.native_amp = False
 
     def _replace_unet_conv_in(self):
         # replace the first layer to accept 8 in_channels
@@ -282,7 +277,7 @@ class SDXLTrainer:
         self.train_metrics.reset()
         accumulated_step = 0
 
-        self.visualize(1000)
+        self.visualize(10)
 
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
@@ -554,8 +549,8 @@ class SDXLTrainer:
             self.out_dir_vis, self._get_backup_ckpt_name()
         )
         os.makedirs(vis_out_dir, exist_ok=True)
-        _ = self.validate_single_dataset(
-            num = num
+        _, FIDscore = self.validate_single_dataset(
+            num = num,
             data_loader=self.vis_loaders[0],
             metric_tracker=self.val_metrics,
             save_to_dir=vis_out_dir,
@@ -576,6 +571,7 @@ class SDXLTrainer:
         # Generate seed sequence for consistent evaluation
         val_init_seed = self.cfg.validation.init_seed
         val_seed_ls = generate_seed_sequence(val_init_seed, len(data_loader))
+        fid = FrechetInceptionDistance(feature_dim=2048)
 
         for i, batch in enumerate(
             tqdm(data_loader, desc=f"evaluating on {data_loader.dataset.disp_name}"),
@@ -588,10 +584,16 @@ class SDXLTrainer:
             # assert 1 == data_loader.batch_size
             # Read input field
             # print(batch)
-            # rgb_in = batch["image"].to(self.device).to(torch.float32)[:1]
+            rgb_in = batch["image"].to(self.device).to(torch.float32)[:1]
             field_in = batch["field"].to(self.device).to(torch.float32)[:1]
             # [1, 3, H, W]
             prompt_in = batch['prompt']
+
+            rgb_norm: torch.Tensor = rgb_in / 255.0  #  [0, 255] -> [0, 1]
+            rgb_norm = rgb_norm.float()
+            assert rgb_norm.min() >= 0.0 and rgb_norm.max() <= 1.0
+            # print("rgb norm", rgb_norm.shape)
+            fid.update(rgb_norm, is_real=True)
 
             # Random number generator
             seed = val_seed_ls.pop()
@@ -619,6 +621,11 @@ class SDXLTrainer:
             image_pred: Image.Image = pipe_out.image
             field_pred: np.ndarray = pipe_out.field
             vis_pred: Image.Image = pipe_out.field_visualized
+
+            pred_norm: torch.Tensor = np.asarray(image_pred) / 255.0  #  [0, 255] -> [0, 1]
+            pred_norm = torch.tensor(np.transpose(pred_norm, (2, 0, 1)).astype(float)).to(torch.float32)
+            assert pred_norm.min() >= 0.0 and pred_norm.max() <= 1.0
+            fid.update(pred_norm.unsqueeze(0), is_real=False)
 
             if save_to_dir is not None:
                 output_dir_jpg = os.path.join(save_to_dir, "image")
@@ -648,7 +655,10 @@ class SDXLTrainer:
                     logging.warning(f"Existing file: '{vis_save_path}' will be overwritten")
                 vis_pred.save(vis_save_path)
 
-        return metric_tracker.result()
+        FIDscore = fid.compute()
+        logging.info(f"FID score:: {FIDscore.item()}")
+
+        return metric_tracker.result(), FIDscore
         
 
     def _get_next_seed(self):
