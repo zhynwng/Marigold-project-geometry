@@ -326,7 +326,7 @@ class SDXLTrainer:
                     self.model.get_time_ids()
 
 
-                num_inference_steps = 1
+                num_inference_steps = 15
                 # Set time steps
                 self.model.scheduler.set_timesteps(num_inference_steps, device=device)
                 timesteps = self.model.scheduler.timesteps
