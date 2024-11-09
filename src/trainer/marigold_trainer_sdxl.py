@@ -109,21 +109,11 @@ class SDXLTrainer:
 
         self.model.unet.requires_grad_(False)
 
-        '''
-        # Add new LoRA weights to the attention layers
-        # Set correct lora layers
-        unet_lora_config = LoraConfig(
-            r=256, # hardcode
-            lora_alpha=4, # hardcode
-            init_lora_weights="gaussian",
-            target_modules=["to_k", "to_q", "to_v", "to_out.0"],
-        )
-
-        self.model.unet.add_adapter(unet_lora_config)
 
         ''' 
         for param in self.model.unet.conv_in.parameters():
             param.requires_grad = True
+        '''
         
         # Optimizer !should be defined after input layer is adapted
         lr = self.cfg.lr
@@ -268,6 +258,8 @@ class SDXLTrainer:
         return
 
     def train(self, t_end=None):
+
+
         logging.info("Start training to predict Image using Marigold")
 
         device = self.device
@@ -555,7 +547,7 @@ class SDXLTrainer:
         )
         os.makedirs(vis_out_dir, exist_ok=True)
         _ = self.validate_single_dataset(
-            num = num
+            num = num,
             data_loader=self.vis_loaders[0],
             metric_tracker=self.val_metrics,
             save_to_dir=vis_out_dir,
@@ -729,6 +721,18 @@ class SDXLTrainer:
         self.model.unet.to(self.device)
         logging.info(f"UNet parameters are loaded from {_model_path}")
 
+
+        # Add new LoRA weights to the attention layers
+        # Set correct lora layers
+        unet_lora_config = LoraConfig(
+            r=256, # hardcode
+            lora_alpha=2.5, # hardcode
+            init_lora_weights="gaussian",
+            target_modules=["to_k", "to_q", "to_v", "to_out.0"],
+        )
+
+        self.model.unet.add_adapter(unet_lora_config)
+        
         # Load training states
         if load_trainer_state:
             checkpoint = torch.load(os.path.join(ckpt_path, "trainer.ckpt"))
