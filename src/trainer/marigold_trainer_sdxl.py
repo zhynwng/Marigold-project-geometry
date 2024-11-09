@@ -59,6 +59,9 @@ from diffusers import UNet2DConditionModel
 
 from safetensors import safe_open
 
+from perspective2d import PerspectiveFields
+
+
 
 class SDXLTrainer:
     def __init__(
@@ -109,6 +112,7 @@ class SDXLTrainer:
 
         self.model.unet.requires_grad_(False)
 
+    
         '''
         # Add new LoRA weights to the attention layers
         # Set correct lora layers
@@ -124,6 +128,7 @@ class SDXLTrainer:
         ''' 
         for param in self.model.unet.conv_in.parameters():
             param.requires_grad = True
+    
         
         # Optimizer !should be defined after input layer is adapted
         lr = self.cfg.lr
@@ -139,6 +144,8 @@ class SDXLTrainer:
 
         # Loss
         self.loss = get_loss(loss_name=self.cfg.loss.name, **self.cfg.loss.kwargs)
+        self.pf_loss = torch.nn.MSELoss()
+        self.pf_loss.requires_grad = True
 
         # Training noise scheduler
         self.training_noise_scheduler: DDPMScheduler = DDPMScheduler.from_pretrained(
@@ -205,6 +212,11 @@ class SDXLTrainer:
         # # Disable AMP for MPS.
         # if torch.backends.mps.is_available():
         #     accelerator.native_amp = False
+
+
+        # Perspective Field extractor
+        version = 'Paramnet-360Cities-edina-centered'
+        self.pf_model = PerspectiveFields(version).eval().cuda()
 
     def _replace_unet_conv_in(self):
         # replace the first layer to accept 8 in_channels
@@ -282,8 +294,6 @@ class SDXLTrainer:
         self.train_metrics.reset()
         accumulated_step = 0
 
-        self.visualize(1000)
-
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
             logging.debug(f"epoch: {self.epoch}")
@@ -303,99 +313,81 @@ class SDXLTrainer:
                 # >>> With gradient accumulation >>>
 
                 # Get data
-                rgb = batch["image"].to(device).to(torch.float32)
                 field = batch["field"].to(device).to(torch.float32)
                 prompt = batch["prompt"]
 
-                # normalize rgb 
-                rgb_norm: torch.Tensor = rgb / 255.0 * 2.0 - 1.0  #  [0, 255] -> [-1, 1]
-                rgb_norm = rgb_norm.float()
-                assert rgb_norm.min() >= -1.0 and rgb_norm.max() <= 1.0
 
 
-                batch_size = rgb.shape[0]
+                # encode field 
                 with torch.no_grad():
-                    # Encode image
-                    rgb_latent = self.model.encode_rgb(rgb_norm)  # [B, 4, h, w]
-                    # Encode field depth
-                    field_latent = self.model.encode_field(field)  # [B, 4, h, w]
+                    field_latent = self.model.encode_field(field)
+                    # if self.prompt_embeds is None:
+                    self.model.encode_prompt(prompt)
+                    self.model.get_time_ids()
 
-                # Sample a random timestep for each image
-                upper_timestep = int(0.5 * self.scheduler_timesteps)
 
-                timesteps = torch.randint(
-                    0,
-                    upper_timestep,
-                    (batch_size,),
-                    device=device,
-                    generator=rand_num_generator,
-                ).long()  # [B]
+                num_inference_steps = 1
+                # Set time steps
+                self.model.scheduler.set_timesteps(num_inference_steps, device=device)
+                timesteps = self.model.scheduler.timesteps
+                #prepare latents
+                latents = torch.randn(field_latent.shape, 
+                                      generator=rand_num_generator, 
+                                      device=device, 
+                                      dtype=self.model.prompt_embeds.dtype)
+                # scale the initial noise by the standard deviation required by the scheduler
+                latents = latents * self.model.scheduler.init_noise_sigma
 
-                # Sample noise
-                if self.apply_multi_res_noise:
-                    strength = self.mr_noise_strength
-                    if self.annealed_mr_noise:
-                        # calculate strength depending on t
-                        strength = strength * (timesteps / self.scheduler_timesteps)
-                    noise = multi_res_noise_like(
-                        field_latent,
-                        strength=strength,
-                        downscale_strategy=self.mr_noise_downscale_strategy,
-                        generator=rand_num_generator,
-                        device=device,
-                    )
-                else:
-                    noise = torch.randn(
-                        rgb_latent.shape,
-                        device=device,
-                        generator=rand_num_generator,
-                    )  # [B, 4, h, w]
+                iterable = enumerate(timesteps)
 
-                # Add noise to the latents (diffusion forward process)
-                noisy_latents = self.training_noise_scheduler.add_noise(
-                    rgb_latent, noise, timesteps
-                )  # [B, 4, h, w]
+                add_text_embeds = self.model.add_text_embeds.to(device)
+                add_time_ids = self.model.add_time_ids.to(device)
+                prompt_embeds = self.model.prompt_embeds.to(device)
 
-                # Text embedding
-                self.model.encode_prompt(prompt)
-                self.model.get_time_ids()
-                text_embed = self.model.prompt_embeds.to(device)
-                # text_embed = self.model.prompt_embeds.to(device).repeat(
-                #     (batch_size, 1, 1)
-                # )  # [B, 77, 1024]
+                for i, t in iterable:
+                    # expand the latents if we are doing classifier free guidance
+                    latent_model_input = torch.cat([field_latent, latents], dim=1)
+                    latent_model_input = self.model.scheduler.scale_model_input(latent_model_input, t)
 
-                added_cond_kwargs = {"text_embeds": self.model.add_text_embeds.to(device), "time_ids": self.model.add_time_ids.to(device)}
+                    # predict the noise residual
+                    added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
 
-                # Concat field and rgb latents
-                cat_latents = torch.cat(
-                    [field_latent, noisy_latents], dim=1
-                )  # [B, 8, h, w]
-                cat_latents = cat_latents.float().to(device)     
+                    noise_pred = self.model.unet(
+                        latent_model_input,
+                        t,
+                        encoder_hidden_states= prompt_embeds,
+                        cross_attention_kwargs= None,
+                        added_cond_kwargs=added_cond_kwargs,
+                        return_dict=False,
+                    )[0]
 
-                # Predict the noise residual
-                model_pred = self.model.unet(
-                    cat_latents, timesteps, text_embed, added_cond_kwargs=added_cond_kwargs,return_dict=False,
-                )[0]  # [B, 4, h, w]
+                    # compute the previous noisy sample x_t -> x_t-1
+                    latents_dtype = latents.dtype
+                    latents = self.model.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                    if latents.dtype != latents_dtype:
+                        if torch.backends.mps.is_available():
+                            # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
+                            latents = latents.to(latents_dtype)
 
-                if torch.isnan(model_pred).any():
-                    logging.warning("model_pred contains NaN.")
+                with torch.no_grad():
+                    rgb = self.model.decode_rgb(latents)
 
-                # Get the target for loss depending on the prediction type
-                if "sample" == self.prediction_type:
-                    target = rgb_latent
-                elif "epsilon" == self.prediction_type:
-                    target = noise
-                elif "v_prediction" == self.prediction_type:
-                    target = self.training_noise_scheduler.get_velocity(
-                        rgb_latent, noise, timesteps
-                    )  # [B, 4, h, w]
-                else:
-                    raise ValueError(f"Unknown prediction type {self.prediction_type}")
 
-               
-                latent_loss = self.loss(model_pred.float(), target.float())
+                # find the perspective field of the generated image
+                rgb = torch.clip(rgb, -1.0, 1.0)
+                rgb = ((rgb + 1.0) / 2.0).squeeze() * 255
 
-                loss = latent_loss.mean()
+                inputs = {"image": rgb, "height": rgb.shape[1], "width": rgb.shape[2]}
+                generated_field = self.pf_model.forward([inputs])[0]
+
+                latitude_map = generated_field['pred_latitude_original']
+                gravity_maps = generated_field['pred_gravity_original']
+                latitude_map = latitude_map / 90
+                joined_maps = torch.cat([gravity_maps, latitude_map.unsqueeze(0),], dim = 0)
+                joined_maps = joined_maps.unsqueeze(0)
+
+            
+                loss = self.pf_loss(joined_maps, field)
 
                 self.train_metrics.update("loss", loss.item())
 
@@ -555,7 +547,7 @@ class SDXLTrainer:
         )
         os.makedirs(vis_out_dir, exist_ok=True)
         _ = self.validate_single_dataset(
-            num = num
+            num = num,
             data_loader=self.vis_loaders[0],
             metric_tracker=self.val_metrics,
             save_to_dir=vis_out_dir,
