@@ -178,7 +178,7 @@ if "__main__" == __name__:
             wandb_id = load_wandb_job_id(out_dir_run)
             wandb_cfg_dic = {
                 "id": wandb_id,
-                "resume": "must",
+                "resume": "allow",
                 **cfg.wandb,
             }
         else:

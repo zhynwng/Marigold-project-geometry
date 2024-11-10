@@ -27,7 +27,7 @@ import os
 import sys
 import shutil
 from datetime import datetime
-from typing import List, Union
+from typing import List, Union, Optional
 
 import numpy as np
 import torch
@@ -277,7 +277,7 @@ class SDXLTrainer:
         self.train_metrics.reset()
         accumulated_step = 0
 
-        self.visualize(10)
+        self.visualize(100)
 
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
