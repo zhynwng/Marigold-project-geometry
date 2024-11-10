@@ -111,7 +111,8 @@ class SDXLTrainer:
         self.model.unet.requires_grad_(False)
 
     
-        self.model.unet.conv_in.bias.requires_grad = True
+        for param in self.model.unet.conv_in.parameters():
+            param.requires_grad = True
         
         
         # Optimizer !should be defined after input layer is adapted
@@ -200,7 +201,7 @@ class SDXLTrainer:
 
         # Perspective Field extractor
         version = 'Paramnet-360Cities-edina-centered'
-        self.pf_model = PerspectiveFields(version).eval().cuda()
+        self.pf_model = PerspectiveFields(version).eval().to(torch.float16).cuda()
 
     def _replace_unet_conv_in(self):
         # replace the first layer to accept 8 in_channels
@@ -297,7 +298,7 @@ class SDXLTrainer:
                 # >>> With gradient accumulation >>>
 
                 # Get data
-                field = batch["field"].to(device)
+                field = batch["field"].to(torch.float16).to(device)
                 prompt = batch["prompt"]
 
 
@@ -310,7 +311,7 @@ class SDXLTrainer:
                     self.model.get_time_ids()
 
 
-                num_inference_steps = 2
+                num_inference_steps = 6
                 # Set time steps
                 self.model.scheduler.set_timesteps(num_inference_steps, device=device)
                 timesteps = self.model.scheduler.timesteps
@@ -344,7 +345,7 @@ class SDXLTrainer:
                         added_cond_kwargs=added_cond_kwargs,
                         return_dict=False,
                     )[0]
-                    
+
                     # compute the previous noisy sample x_t -> x_t-1
                     latents_dtype = latents.dtype
                     latents = self.model.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
@@ -353,8 +354,10 @@ class SDXLTrainer:
                             # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
                             latents = latents.to(latents_dtype)
 
+
                 with torch.no_grad():
-                    rgb = self.model.decode_rgb(latents)
+                    latents = latents / self.model.vae.config.scaling_factor
+                    rgb = self.model.vae.decode(latents, return_dict=False)[0]
 
                 # find the perspective field of the generated image
                 rgb = torch.clip(rgb, -1.0, 1.0)
@@ -362,6 +365,7 @@ class SDXLTrainer:
 
                 inputs = {"image": rgb, "height": rgb.shape[1], "width": rgb.shape[2]}
 
+                
                 generated_field = self.pf_model.forward([inputs])[0]
                 
                 latitude_map = generated_field['pred_latitude_original']
@@ -369,13 +373,14 @@ class SDXLTrainer:
                 latitude_map = latitude_map / 90
                     
                 joined_maps = torch.cat([gravity_maps, latitude_map.unsqueeze(0),], dim = 0)
-                joined_maps = joined_maps.unsqueeze(0)
+                joined_maps = joined_maps.unsqueeze(0).to(torch.float16)
 
             
                 loss = self.pf_loss(joined_maps, field)
 
                 self.train_metrics.update("loss", loss.item())
 
+                
                 loss = loss / self.gradient_accumulation_steps
                 loss.backward()
                 accumulated_step += 1
@@ -432,10 +437,11 @@ class SDXLTrainer:
                         self.save_checkpoint(ckpt_name="latest", save_train_state=True)
                         logging.info("Time is up, training paused.")
                         return
-
+                
+                    #print(f"Memory cached in GPU: {torch.cuda.memory_cached()}")
+                    
                     torch.cuda.empty_cache()
                     # <<< Effective batch end <<<
-
             # Epoch end
             self.n_batch_in_epoch = 0
 
@@ -793,7 +799,7 @@ class SDXLTrainer:
             unet_state_dict.update(part_dict)
         
         self.model.unet.load_state_dict(unet_state_dict)
-        self.model.unet.to(self.device)
+        self.model.unet.to(torch.float16).to(self.device)
         logging.info(f"UNet parameters are loaded from {_model_path}")
 
 

@@ -328,7 +328,7 @@ if "__main__" == __name__:
     # -------------------- Model --------------------
     _pipeline_kwargs = cfg.pipeline.kwargs if cfg.pipeline.kwargs is not None else {}
     model = SDXLPipeline.from_pretrained(
-        os.path.join(base_ckpt_dir, cfg.model.pretrained_path), **_pipeline_kwargs, addition_embed_type = None, variant="fp16", use_safetensors=True
+        os.path.join(base_ckpt_dir, cfg.model.pretrained_path), **_pipeline_kwargs, addition_embed_type = None, torch_dtype=torch.float16, variant="fp16", use_safetensors=True
     )
 
     # -------------------- Trainer --------------------
