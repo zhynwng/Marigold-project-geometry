@@ -305,12 +305,12 @@ class SDXLTrainer:
 
                 # encode field 
                 with torch.no_grad():
-                    field_latent = self.model.encode_field(field).to(torch.float16)
+                    field_latent = self.model.encode_field(field)
                     # if self.prompt_embeds is None:
                     self.model.encode_prompt(prompt)
                     self.model.get_time_ids()
 
-                num_inference_steps = 6
+                num_inference_steps = 5
                 # Set time steps
                 self.model.scheduler.set_timesteps(num_inference_steps, device=device)
                 timesteps = self.model.scheduler.timesteps
