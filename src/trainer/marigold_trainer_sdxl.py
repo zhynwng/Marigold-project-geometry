@@ -279,6 +279,7 @@ class SDXLTrainer:
         self.train_metrics.reset()
         accumulated_step = 0
 
+
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
             logging.debug(f"epoch: {self.epoch}")
@@ -298,18 +299,16 @@ class SDXLTrainer:
                 # >>> With gradient accumulation >>>
 
                 # Get data
-                field = batch["field"].to(torch.float16).to(device)
+                field = batch["field"].to(torch.float32).to(device)
                 prompt = batch["prompt"]
-
 
 
                 # encode field 
                 with torch.no_grad():
-                    field_latent = self.model.encode_field(field)
+                    field_latent = self.model.encode_field(field).to(torch.float16)
                     # if self.prompt_embeds is None:
                     self.model.encode_prompt(prompt)
                     self.model.get_time_ids()
-
 
                 num_inference_steps = 6
                 # Set time steps
@@ -329,6 +328,7 @@ class SDXLTrainer:
                 add_time_ids = self.model.add_time_ids.to(device)
                 prompt_embeds = self.model.prompt_embeds.to(device)
 
+                
                 for i, t in iterable:
                     # expand the latents if we are doing classifier free guidance
                     latent_model_input = torch.cat([field_latent, latents], dim=1)
@@ -346,6 +346,7 @@ class SDXLTrainer:
                         return_dict=False,
                     )[0]
 
+
                     # compute the previous noisy sample x_t -> x_t-1
                     latents_dtype = latents.dtype
                     latents = self.model.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
@@ -356,8 +357,8 @@ class SDXLTrainer:
 
 
                 with torch.no_grad():
-                    latents = latents / self.model.vae.config.scaling_factor
-                    rgb = self.model.vae.decode(latents, return_dict=False)[0]
+                    latents = latents.to(torch.float32) / self.model.vae.config.scaling_factor
+                    rgb = self.model.vae.decode(latents, return_dict=False)[0].to(torch.float16)     
 
                 # find the perspective field of the generated image
                 rgb = torch.clip(rgb, -1.0, 1.0)
@@ -368,15 +369,16 @@ class SDXLTrainer:
                 
                 generated_field = self.pf_model.forward([inputs])[0]
                 
-                latitude_map = generated_field['pred_latitude_original']
-                gravity_maps = generated_field['pred_gravity_original']
+                latitude_map = generated_field['pred_latitude_original'].to(torch.float16)
+                gravity_maps = generated_field['pred_gravity_original'].to(torch.float16)
                 latitude_map = latitude_map / 90
                     
                 joined_maps = torch.cat([gravity_maps, latitude_map.unsqueeze(0),], dim = 0)
-                joined_maps = joined_maps.unsqueeze(0).to(torch.float16)
+                joined_maps = joined_maps.unsqueeze(0)
 
             
-                loss = self.pf_loss(joined_maps, field)
+
+                loss = self.pf_loss(joined_maps, field.to(torch.float16))
 
                 self.train_metrics.update("loss", loss.item())
 
@@ -800,6 +802,8 @@ class SDXLTrainer:
         
         self.model.unet.load_state_dict(unet_state_dict)
         self.model.unet.to(torch.float16).to(self.device)
+        self.model.vae.to(torch.float32).to(self.device)
+
         logging.info(f"UNet parameters are loaded from {_model_path}")
 
 
