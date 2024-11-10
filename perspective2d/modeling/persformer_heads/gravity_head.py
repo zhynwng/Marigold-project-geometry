@@ -252,6 +252,7 @@ class GravityDecoder(BaseDecodeHead):
                 .unsqueeze(-1)
                 .to(vec.device)
             )
+
             vec_original = vec * scale
             vec_original = pf_postprocess(vec_original, self.image_size, height, width)
             vec_original = F.normalize(vec_original, dim=0)

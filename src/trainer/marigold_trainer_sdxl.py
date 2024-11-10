@@ -107,16 +107,12 @@ class SDXLTrainer:
         self.model.text_encoder.requires_grad_(False)
         self.model.text_encoder_2.requires_grad_(False)
         self.model.unet.train()
-        self.model.unet.to(dtype=torch.float32)
-
 
         self.model.unet.requires_grad_(False)
 
     
-    
-
-        for param in self.model.unet.conv_in.parameters():
-            param.requires_grad = True
+        self.model.unet.conv_in.bias.requires_grad = True
+        
         
         # Optimizer !should be defined after input layer is adapted
         lr = self.cfg.lr
@@ -301,7 +297,7 @@ class SDXLTrainer:
                 # >>> With gradient accumulation >>>
 
                 # Get data
-                field = batch["field"].to(device).to(torch.float32)
+                field = batch["field"].to(device)
                 prompt = batch["prompt"]
 
 
@@ -314,7 +310,7 @@ class SDXLTrainer:
                     self.model.get_time_ids()
 
 
-                num_inference_steps = 15
+                num_inference_steps = 2
                 # Set time steps
                 self.model.scheduler.set_timesteps(num_inference_steps, device=device)
                 timesteps = self.model.scheduler.timesteps
@@ -348,8 +344,7 @@ class SDXLTrainer:
                         added_cond_kwargs=added_cond_kwargs,
                         return_dict=False,
                     )[0]
-
-                    print(i)
+                    
                     # compute the previous noisy sample x_t -> x_t-1
                     latents_dtype = latents.dtype
                     latents = self.model.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
@@ -361,17 +356,17 @@ class SDXLTrainer:
                 with torch.no_grad():
                     rgb = self.model.decode_rgb(latents)
 
-                    # find the perspective field of the generated image
-                    rgb = torch.clip(rgb, -1.0, 1.0)
-                    rgb = ((rgb + 1.0) / 2.0).squeeze() * 255
+                # find the perspective field of the generated image
+                rgb = torch.clip(rgb, -1.0, 1.0)
+                rgb = ((rgb + 1.0) / 2.0).squeeze() * 255
 
-                    inputs = {"image": rgb, "height": rgb.shape[1], "width": rgb.shape[2]}
+                inputs = {"image": rgb, "height": rgb.shape[1], "width": rgb.shape[2]}
 
-                    generated_field = self.pf_model.forward([inputs])[0]
-
-                    latitude_map = generated_field['pred_latitude_original']
-                    gravity_maps = generated_field['pred_gravity_original']
-                    latitude_map = latitude_map / 90
+                generated_field = self.pf_model.forward([inputs])[0]
+                
+                latitude_map = generated_field['pred_latitude_original']
+                gravity_maps = generated_field['pred_gravity_original']
+                latitude_map = latitude_map / 90
                     
                 joined_maps = torch.cat([gravity_maps, latitude_map.unsqueeze(0),], dim = 0)
                 joined_maps = joined_maps.unsqueeze(0)
@@ -802,6 +797,8 @@ class SDXLTrainer:
         logging.info(f"UNet parameters are loaded from {_model_path}")
 
 
+        for name, param in self.model.unet.conv_in.named_parameters():
+            print(name, param.requires_grad)
         # Load training states
         if load_trainer_state:
             checkpoint = torch.load(os.path.join(ckpt_path, "trainer.ckpt"))

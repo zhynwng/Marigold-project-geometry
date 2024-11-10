@@ -121,7 +121,9 @@ def decode_bin(angle_bin, num_bin):
     Returns:
         np.ndarray: decoded vector field of shape (2, h, w)
     """
+
     angle = (angle_bin * (360 / (num_bin - 1)) - 180) / 180 * np.pi
+
     cos = torch.cos(angle)
     sin = torch.sin(angle)
     vector_field = torch.stack((cos, sin), dim=0)

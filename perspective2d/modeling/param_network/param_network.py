@@ -24,9 +24,9 @@ def to_numpy(x):
         return x
     elif isinstance(x, torch.Tensor):
         if x.is_cuda:
-            return x.detach().cpu().numpy()
+            return x.clone().detach().cpu().numpy()
         else:
-            return x.detach().numpy()
+            return x.clone().detach().numpy()
     else:
         return np.array(x)
 
