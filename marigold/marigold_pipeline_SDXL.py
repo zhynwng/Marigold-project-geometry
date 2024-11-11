@@ -600,7 +600,7 @@ class SDXLPipeline(
     def decode_rgb(self, latents: torch.Tensor) -> torch.Tensor:
         # unscale/denormalize the latents
         # denormalize with the mean and std if available and not None
-        latents = latents.to(torch.float32)
+        latents = latents
         has_latents_mean = hasattr(self.vae.config, "latents_mean") and self.vae.config.latents_mean is not None
         has_latents_std = hasattr(self.vae.config, "latents_std") and self.vae.config.latents_std is not None
         if has_latents_mean and has_latents_std:

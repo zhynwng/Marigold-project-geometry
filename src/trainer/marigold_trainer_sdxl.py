@@ -63,6 +63,7 @@ from perspective2d import PerspectiveFields
 
 
 
+
 class SDXLTrainer:
     def __init__(
         self,
@@ -95,6 +96,7 @@ class SDXLTrainer:
         # Adapt input layers
         if 8 != self.model.unet.config["in_channels"]:
             self._replace_unet_conv_in_zero_intialization()
+
 
         # Encode empty text prompt
         # self.model.encode_prompt()
@@ -130,7 +132,6 @@ class SDXLTrainer:
         # Loss
         self.loss = get_loss(loss_name=self.cfg.loss.name, **self.cfg.loss.kwargs)
         self.pf_loss = torch.nn.MSELoss()
-        self.pf_loss.requires_grad = True
 
         # Training noise scheduler
         self.training_noise_scheduler: DDPMScheduler = DDPMScheduler.from_pretrained(
@@ -201,7 +202,9 @@ class SDXLTrainer:
 
         # Perspective Field extractor
         version = 'Paramnet-360Cities-edina-centered'
-        self.pf_model = PerspectiveFields(version).eval().to(torch.float16).cuda()
+        self.pf_model = PerspectiveFields(version).eval().cuda()
+
+        self.scaler = torch.cuda.amp.GradScaler()
 
     def _replace_unet_conv_in(self):
         # replace the first layer to accept 8 in_channels
@@ -267,9 +270,10 @@ class SDXLTrainer:
     def train(self, t_end=None):
         logging.info("Start training to predict Image using Marigold")
 
+        lr = self.cfg.lr
+        self.optimizer = Adam(self.model.unet.parameters(), lr=lr)
         device = self.device
         self.model.to(device)
-
         if self.in_evaluation:
             logging.info(
                 "Last evaluation was not finished, will do evaluation before continue training."
@@ -298,93 +302,92 @@ class SDXLTrainer:
 
                 # >>> With gradient accumulation >>>
 
-                # Get data
-                field = batch["field"].to(torch.float32).to(device)
-                prompt = batch["prompt"]
+                with torch.autocast(device_type='cuda', dtype=torch.float16):
+                    # Get data
+                    field = batch["field"].to(device)
+                    prompt = batch["prompt"]
 
 
-                # encode field 
-                with torch.no_grad():
-                    field_latent = self.model.encode_field(field)
-                    # if self.prompt_embeds is None:
-                    self.model.encode_prompt(prompt)
-                    self.model.get_time_ids()
+                    # encode field 
+                    with torch.no_grad():
+                        field_latent = self.model.encode_field(field)
+                        # if self.prompt_embeds is None:
+                        self.model.encode_prompt(prompt)
+                        self.model.get_time_ids()
 
-                num_inference_steps = 5
-                # Set time steps
-                self.model.scheduler.set_timesteps(num_inference_steps, device=device)
-                timesteps = self.model.scheduler.timesteps
-                #prepare latents
-                latents = torch.randn(field_latent.shape, 
-                                      generator=rand_num_generator, 
-                                      device=device, 
-                                      dtype=self.model.prompt_embeds.dtype)
-                # scale the initial noise by the standard deviation required by the scheduler
-                latents = latents * self.model.scheduler.init_noise_sigma
+                    num_inference_steps = 1
+                    # Set time steps
+                    self.model.scheduler.set_timesteps(num_inference_steps, device=device)
+                    timesteps = self.model.scheduler.timesteps
+                    #prepare latents
+                    latents = torch.randn(field_latent.shape, 
+                                        generator=rand_num_generator, 
+                                        device=device, 
+                                        dtype=self.model.prompt_embeds.dtype)
+                    # scale the initial noise by the standard deviation required by the scheduler
+                    latents = latents * self.model.scheduler.init_noise_sigma
 
-                iterable = enumerate(timesteps)
+                    iterable = enumerate(timesteps)
 
-                add_text_embeds = self.model.add_text_embeds.to(device)
-                add_time_ids = self.model.add_time_ids.to(device)
-                prompt_embeds = self.model.prompt_embeds.to(device)
+                    add_text_embeds = self.model.add_text_embeds.to(device)
+                    add_time_ids = self.model.add_time_ids.to(device)
+                    prompt_embeds = self.model.prompt_embeds.to(device)
 
-                
-                for i, t in iterable:
-                    # expand the latents if we are doing classifier free guidance
-                    latent_model_input = torch.cat([field_latent, latents], dim=1)
-                    latent_model_input = self.model.scheduler.scale_model_input(latent_model_input, t)
-
-                    # predict the noise residual
-                    added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
-
-                    noise_pred = self.model.unet(
-                        latent_model_input,
-                        t,
-                        encoder_hidden_states= prompt_embeds,
-                        cross_attention_kwargs= None,
-                        added_cond_kwargs=added_cond_kwargs,
-                        return_dict=False,
-                    )[0]
-
-
-                    # compute the previous noisy sample x_t -> x_t-1
-                    latents_dtype = latents.dtype
-                    latents = self.model.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
-                    if latents.dtype != latents_dtype:
-                        if torch.backends.mps.is_available():
-                            # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
-                            latents = latents.to(latents_dtype)
-
-
-                with torch.no_grad():
-                    latents = latents.to(torch.float32) / self.model.vae.config.scaling_factor
-                    rgb = self.model.vae.decode(latents, return_dict=False)[0].to(torch.float16)     
-
-                # find the perspective field of the generated image
-                rgb = torch.clip(rgb, -1.0, 1.0)
-                rgb = ((rgb + 1.0) / 2.0).squeeze() * 255
-
-                inputs = {"image": rgb, "height": rgb.shape[1], "width": rgb.shape[2]}
-
-                
-                generated_field = self.pf_model.forward([inputs])[0]
-                
-                latitude_map = generated_field['pred_latitude_original'].to(torch.float16)
-                gravity_maps = generated_field['pred_gravity_original'].to(torch.float16)
-                latitude_map = latitude_map / 90
                     
-                joined_maps = torch.cat([gravity_maps, latitude_map.unsqueeze(0),], dim = 0)
-                joined_maps = joined_maps.unsqueeze(0)
+                    for i, t in iterable:
+                        # expand the latents if we are doing classifier free guidance
+                        latent_model_input = torch.cat([field_latent, latents], dim=1)
+                        latent_model_input = self.model.scheduler.scale_model_input(latent_model_input, t)
 
-            
+                        # predict the noise residual
+                        added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
 
-                loss = self.pf_loss(joined_maps, field.to(torch.float16))
+                        noise_pred = self.model.unet(
+                            latent_model_input,
+                            t,
+                            encoder_hidden_states= prompt_embeds,
+                            cross_attention_kwargs= None,
+                            added_cond_kwargs=added_cond_kwargs,
+                            return_dict=False,
+                        )[0]
 
-                self.train_metrics.update("loss", loss.item())
 
+                        # compute the previous noisy sample x_t -> x_t-1
+                        latents_dtype = latents.dtype
+                        latents = self.model.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                        if latents.dtype != latents_dtype:
+                            if torch.backends.mps.is_available():
+                                # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
+                                latents = latents.to(latents_dtype)
+
+
+                    with torch.no_grad():
+                        latents = latents/ self.model.vae.config.scaling_factor
+                        rgb = self.model.vae.decode(latents, return_dict=False)[0].to(torch.float16)     
+
+                    # find the perspective field of the generated image
+                    rgb = torch.clip(rgb, -1.0, 1.0)
+                    rgb = ((rgb + 1.0) / 2.0).squeeze() * 255
+
+                    inputs = {"image": rgb, "height": rgb.shape[1], "width": rgb.shape[2]}
+
+                    
+                    generated_field = self.pf_model.forward([inputs])[0]
+                    
+                    latitude_map = generated_field['pred_latitude_original']
+                    gravity_maps = generated_field['pred_gravity_original']
+                    latitude_map = latitude_map / 90
+                        
+                    joined_maps = torch.cat([gravity_maps, latitude_map.unsqueeze(0),], dim = 0)
+                    joined_maps = joined_maps.unsqueeze(0)
+
+
+                    loss = self.pf_loss(joined_maps, field)
+                    self.train_metrics.update("loss", loss.item())
+                    
+                    loss = loss / self.gradient_accumulation_steps
                 
-                loss = loss / self.gradient_accumulation_steps
-                loss.backward()
+                self.scaler.scale(loss).backward()
                 accumulated_step += 1
 
                 self.n_batch_in_epoch += 1
@@ -392,8 +395,9 @@ class SDXLTrainer:
 
                 # Perform optimization step
                 if accumulated_step >= self.gradient_accumulation_steps:
-                    self.optimizer.step()
+                    self.scaler.step(self.optimizer)
                     self.lr_scheduler.step()
+                    self.scaler.update()
                     self.optimizer.zero_grad()
                     accumulated_step = 0
 
@@ -801,14 +805,11 @@ class SDXLTrainer:
             unet_state_dict.update(part_dict)
         
         self.model.unet.load_state_dict(unet_state_dict)
-        self.model.unet.to(torch.float16).to(self.device)
-        self.model.vae.to(torch.float32).to(self.device)
+        self.model.unet.to(self.device)
+        self.model.vae.to(self.device)
 
         logging.info(f"UNet parameters are loaded from {_model_path}")
 
-
-        for name, param in self.model.unet.conv_in.named_parameters():
-            print(name, param.requires_grad)
         # Load training states
         if load_trainer_state:
             checkpoint = torch.load(os.path.join(ckpt_path, "trainer.ckpt"))
@@ -820,7 +821,7 @@ class SDXLTrainer:
 
             self.best_metric = checkpoint["best_metric"]
 
-            self.optimizer.load_state_dict(checkpoint["optimizer"])
+            #self.optimizer.load_state_dict(checkpoint["optimizer"])
             logging.info(f"optimizer state is loaded from {ckpt_path}")
 
             if resume_lr_scheduler:
