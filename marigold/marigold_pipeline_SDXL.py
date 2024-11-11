@@ -301,14 +301,8 @@ class SDXLPipeline(
         # Batch repeated input image
         duplicated_field = input_field.expand(ensemble_size, -1, -1, -1) # [B, C, 256, 256]
         single_field_dataset = TensorDataset(duplicated_field)
-        if batch_size > 0:
-            _bs = batch_size
-        else:
-            _bs = find_batch_size(
-                ensemble_size=ensemble_size,
-                input_res=max(rgb_norm.shape[1:]),
-                dtype=self.dtype,
-            )
+
+        _bs = batch_size
         single_field_loader = DataLoader(
             single_field_dataset, batch_size=_bs, shuffle=False
         )
@@ -346,7 +340,7 @@ class SDXLPipeline(
         field_pred[:, :, 2] *= 90 
 
         # Visualize; would need further work
-        field_visualized =  draw_perspective_fields(image_pred, field_pred[:, :, :2], np.deg2rad(field_pred[:, :, 2] * 90))
+        field_visualized =  draw_perspective_fields(image_pred, field_pred[:, :, :2], np.deg2rad(field_pred[:, :, 2]))
 
         return SDXLOutput (
             image = Image.fromarray((image_pred).astype(np.uint8)),
@@ -511,7 +505,7 @@ class SDXLPipeline(
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps
         #prepare latents
-        latents = torch.randn(field_latent.shape, generator=generator, device=device, dtype=self.prompt_embeds.dtype)
+        latents = torch.randn(field_latent.shape, generator=generator, device=device, dtype=field_latent.dtype)
         # scale the initial noise by the standard deviation required by the scheduler
         latents = latents * self.scheduler.init_noise_sigma
 
@@ -592,7 +586,7 @@ class SDXLPipeline(
         latent = self.vae.encode(field_in).latent_dist.sample()
         latent = latent * self.vae.config.scaling_factor
     
-        latent = latent.to(torch.float16).to(self.device)
+        latent = latent.to(self.device)
 
         return latent
 
@@ -600,7 +594,7 @@ class SDXLPipeline(
     def decode_rgb(self, latents: torch.Tensor) -> torch.Tensor:
         # unscale/denormalize the latents
         # denormalize with the mean and std if available and not None
-        latents = latents
+        latents = latents.to(torch.float16)
         has_latents_mean = hasattr(self.vae.config, "latents_mean") and self.vae.config.latents_mean is not None
         has_latents_std = hasattr(self.vae.config, "latents_std") and self.vae.config.latents_std is not None
         if has_latents_mean and has_latents_std:

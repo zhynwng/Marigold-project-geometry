@@ -55,13 +55,27 @@ from src.util.multi_res_noise import multi_res_noise_like
 from src.util.alignment import align_depth_least_square
 from src.util.seeding import generate_seed_sequence
 
-from diffusers import UNet2DConditionModel
+from diffusers import AutoencoderKL
 
 from safetensors import safe_open
 
 from perspective2d import PerspectiveFields
 
 
+
+class Conv_in_32fp(torch.nn.Module):
+    def __init__(self, conv_in):
+        """
+        wrapper for conv_in layer
+        """
+        super().__init__()
+        self.conv_in = conv_in.to(torch.float32)
+
+    def forward(self, x):
+        x = x.to(torch.float32)
+        y = self.conv_in(x)
+        y = y.to(torch.float16)
+        return y
 
 
 class SDXLTrainer:
@@ -203,6 +217,7 @@ class SDXLTrainer:
         # Perspective Field extractor
         version = 'Paramnet-360Cities-edina-centered'
         self.pf_model = PerspectiveFields(version).eval().cuda()
+        self.pf_model = self.pf_model.to(dtype=torch.float16)
 
         self.scaler = torch.cuda.amp.GradScaler()
 
@@ -270,8 +285,6 @@ class SDXLTrainer:
     def train(self, t_end=None):
         logging.info("Start training to predict Image using Marigold")
 
-        lr = self.cfg.lr
-        self.optimizer = Adam(self.model.unet.parameters(), lr=lr)
         device = self.device
         self.model.to(device)
         if self.in_evaluation:
@@ -284,6 +297,7 @@ class SDXLTrainer:
         accumulated_step = 0
 
 
+        self.visualize(3)
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
             logging.debug(f"epoch: {self.epoch}")
@@ -302,68 +316,66 @@ class SDXLTrainer:
 
                 # >>> With gradient accumulation >>>
 
-                with torch.autocast(device_type='cuda', dtype=torch.float16):
-                    # Get data
-                    field = batch["field"].to(device)
-                    prompt = batch["prompt"]
+                # Get data
+                field = batch["field"].to(device)
+                prompt = batch["prompt"]
 
 
-                    # encode field 
-                    with torch.no_grad():
-                        field_latent = self.model.encode_field(field)
-                        # if self.prompt_embeds is None:
-                        self.model.encode_prompt(prompt)
-                        self.model.get_time_ids()
+                # encode field 
+                with torch.no_grad():
+                    field_latent = self.model.encode_field(field.to(dtype=torch.float16))
+                    # if self.prompt_embeds is None:
+                    self.model.encode_prompt(prompt)
+                    self.model.get_time_ids()
 
-                    num_inference_steps = 1
-                    # Set time steps
-                    self.model.scheduler.set_timesteps(num_inference_steps, device=device)
-                    timesteps = self.model.scheduler.timesteps
-                    #prepare latents
-                    latents = torch.randn(field_latent.shape, 
-                                        generator=rand_num_generator, 
-                                        device=device, 
-                                        dtype=self.model.prompt_embeds.dtype)
-                    # scale the initial noise by the standard deviation required by the scheduler
-                    latents = latents * self.model.scheduler.init_noise_sigma
+                num_inference_steps = 1
+                # Set time steps
+                self.model.scheduler.set_timesteps(num_inference_steps, device=device)
+                timesteps = self.model.scheduler.timesteps
+                #prepare latents
+                latents = torch.randn(field_latent.shape, 
+                                    generator=rand_num_generator, 
+                                    device=device, 
+                                    dtype=field_latent.dtype)
+                # scale the initial noise by the standard deviation required by the scheduler
+                latents = latents * self.model.scheduler.init_noise_sigma
 
-                    iterable = enumerate(timesteps)
+                iterable = enumerate(timesteps)
 
-                    add_text_embeds = self.model.add_text_embeds.to(device)
-                    add_time_ids = self.model.add_time_ids.to(device)
-                    prompt_embeds = self.model.prompt_embeds.to(device)
+                add_text_embeds = self.model.add_text_embeds.to(device)
+                add_time_ids = self.model.add_time_ids.to(device)
+                prompt_embeds = self.model.prompt_embeds.to(device)
 
-                    
-                    for i, t in iterable:
-                        # expand the latents if we are doing classifier free guidance
-                        latent_model_input = torch.cat([field_latent, latents], dim=1)
-                        latent_model_input = self.model.scheduler.scale_model_input(latent_model_input, t)
+                
+                for i, t in iterable:
+                    # expand the latents if we are doing classifier free guidance
+                    latent_model_input = torch.cat([field_latent, latents], dim=1)
+                    latent_model_input = self.model.scheduler.scale_model_input(latent_model_input, t)
 
-                        # predict the noise residual
-                        added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
+                    # predict the noise residual
+                    added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
 
-                        noise_pred = self.model.unet(
-                            latent_model_input,
-                            t,
-                            encoder_hidden_states= prompt_embeds,
-                            cross_attention_kwargs= None,
-                            added_cond_kwargs=added_cond_kwargs,
-                            return_dict=False,
-                        )[0]
-
-
-                        # compute the previous noisy sample x_t -> x_t-1
-                        latents_dtype = latents.dtype
-                        latents = self.model.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
-                        if latents.dtype != latents_dtype:
-                            if torch.backends.mps.is_available():
-                                # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
-                                latents = latents.to(latents_dtype)
+                    noise_pred = self.model.unet(
+                        latent_model_input,
+                        t,
+                        encoder_hidden_states= prompt_embeds,
+                        cross_attention_kwargs= None,
+                        added_cond_kwargs=added_cond_kwargs,
+                        return_dict=False,
+                    )[0]
 
 
-                    with torch.no_grad():
-                        latents = latents/ self.model.vae.config.scaling_factor
-                        rgb = self.model.vae.decode(latents, return_dict=False)[0].to(torch.float16)     
+                    # compute the previous noisy sample x_t -> x_t-1
+                    latents_dtype = latents.dtype
+                    latents = self.model.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                    if latents.dtype != latents_dtype:
+                        if torch.backends.mps.is_available():
+                            # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
+                            latents = latents.to(latents_dtype)
+
+
+                    latents = latents / self.model.vae.config.scaling_factor
+                    rgb = self.model.vae.decode(latents, return_dict=False)[0]   
 
                     # find the perspective field of the generated image
                     rgb = torch.clip(rgb, -1.0, 1.0)
@@ -380,6 +392,8 @@ class SDXLTrainer:
                         
                     joined_maps = torch.cat([gravity_maps, latitude_map.unsqueeze(0),], dim = 0)
                     joined_maps = joined_maps.unsqueeze(0)
+
+                    joined_maps = joined_maps.to(dtype=torch.float32)
 
 
                     loss = self.pf_loss(joined_maps, field)
@@ -444,7 +458,7 @@ class SDXLTrainer:
                         logging.info("Time is up, training paused.")
                         return
                 
-                    #print(f"Memory cached in GPU: {torch.cuda.memory_cached()}")
+                    print(f"Memory cached in GPU: {torch.cuda.memory_cached()}")
                     
                     torch.cuda.empty_cache()
                     # <<< Effective batch end <<<
@@ -583,7 +597,6 @@ class SDXLTrainer:
 
         for i, batch in enumerate(
             tqdm(data_loader, desc=f"evaluating on {data_loader.dataset.disp_name}"),
-            start=1,
         ):
 
             if i >= num:
@@ -593,7 +606,7 @@ class SDXLTrainer:
             # Read input field
             # print(batch)
             # rgb_in = batch["image"].to(self.device).to(torch.float32)[:1]
-            field_in = batch["field"].to(self.device).to(torch.float32)[:1]
+            field_in = batch["field"].to(self.device).to(torch.float16)[:1]
             # [1, 3, H, W]
             prompt_in = batch['prompt']
 
@@ -677,7 +690,6 @@ class SDXLTrainer:
 
         for i, batch in enumerate(
             tqdm(data_loader, desc=f"evaluating on {data_loader.dataset.disp_name}"),
-            start=1,
         ):
 
             if i >= num:
@@ -687,7 +699,7 @@ class SDXLTrainer:
             # Read input field
             # print(batch)
             # rgb_in = batch["image"].to(self.device).to(torch.float32)[:1]
-            field_in = batch["field"].to(self.device).to(torch.float32)[:1]
+            field_in = batch["field"].to(self.device).to(torch.float16)[:1]
             # [1, 3, H, W]
             prompt_in = batch['prompt']
 
@@ -806,7 +818,15 @@ class SDXLTrainer:
         
         self.model.unet.load_state_dict(unet_state_dict)
         self.model.unet.to(self.device)
-        self.model.vae.to(self.device)
+        self.model.unet = self.model.unet.to(torch.float16)
+
+        self.model.unet.conv_in = Conv_in_32fp(self.model.unet.conv_in)
+
+        # only upcast the conv_in layer
+
+
+        self.model.vae = AutoencoderKL.from_pretrained("/share/data/p2p/zhiyanw/sdxl-vae-fp16-fix", torch_dtype=torch.float16)
+
 
         logging.info(f"UNet parameters are loaded from {_model_path}")
 
