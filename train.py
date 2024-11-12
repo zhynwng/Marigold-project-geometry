@@ -358,7 +358,7 @@ if "__main__" == __name__:
     # -------------------- Checkpoint --------------------
     if resume_run is not None:
         trainer.load_checkpoint(
-            resume_run, load_trainer_state=True, resume_lr_scheduler=True
+            resume_run, load_trainer_state=True, resume_lr_scheduler=True,
         )
 
     # -------------------- Training & Evaluation Loop --------------------

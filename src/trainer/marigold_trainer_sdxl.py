@@ -153,7 +153,8 @@ class SDXLTrainer:
                 base_ckpt_dir,
                 cfg.trainer.training_noise_scheduler.pretrained_path,
                 "scheduler",
-            )
+            ), 
+            torch_dtype=torch.float16
         )
         self.prediction_type = self.training_noise_scheduler.config.prediction_type
         assert (
@@ -217,7 +218,7 @@ class SDXLTrainer:
         # Perspective Field extractor
         version = 'Paramnet-360Cities-edina-centered'
         self.pf_model = PerspectiveFields(version).eval().cuda()
-        self.pf_model = self.pf_model.to(dtype=torch.float16)
+        self.pf_model = self.pf_model.to(torch.float16)
 
         self.scaler = torch.cuda.amp.GradScaler()
 
@@ -297,7 +298,7 @@ class SDXLTrainer:
         accumulated_step = 0
 
 
-        self.visualize(3)
+        #self.visualize(3)
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
             logging.debug(f"epoch: {self.epoch}")
@@ -317,90 +318,129 @@ class SDXLTrainer:
                 # >>> With gradient accumulation >>>
 
                 # Get data
+                rgb = batch["image"].to(device).to(torch.float16)
                 field = batch["field"].to(device)
                 prompt = batch["prompt"]
 
+                # normalize rgb 
+                rgb_norm: torch.Tensor = rgb / 255.0 * 2.0 - 1.0  #  [0, 255] -> [-1, 1]
+                assert rgb_norm.min() >= -1.0 and rgb_norm.max() <= 1.0
 
-                # encode field 
+
+
+                batch_size = rgb.shape[0]
                 with torch.no_grad():
-                    field_latent = self.model.encode_field(field.to(dtype=torch.float16))
-                    # if self.prompt_embeds is None:
+                    # Encode image
+                    rgb_latent = self.model.encode_rgb(rgb_norm)  # [B, 4, h, w]
+                    # Encode field depth
+                    field_latent = self.model.encode_field(field.to(torch.float16))  # [B, 4, h, w]
+
+                # Sample a random timestep for each image
+                    
+                timesteps = torch.randint(
+                    0,
+                    self.scheduler_timesteps,
+                    (batch_size,),
+                    device=device,
+                    generator=rand_num_generator,
+                ).long()  # [B]
+
+                # Sample noise
+                if self.apply_multi_res_noise:
+                    strength = self.mr_noise_strength
+                    if self.annealed_mr_noise:
+                        # calculate strength depending on t
+                        strength = strength * (timesteps / self.scheduler_timesteps)
+                    noise = multi_res_noise_like(
+                        field_latent,
+                        strength=strength,
+                        downscale_strategy=self.mr_noise_downscale_strategy,
+                        generator=rand_num_generator,
+                        device=device,
+                    )
+                else:
+                    noise = torch.randn(
+                        rgb_latent.shape,
+                        device=device,
+                        generator=rand_num_generator,
+                    )  # [B, 4, h, w]
+
+
+
+                # Add noise to the latents (diffusion forward process)
+                noisy_latents = self.training_noise_scheduler.add_noise(
+                    rgb_latent, noise, timesteps
+                ).to(torch.float16)  # [B, 4, h, w]
+
+                # Text embedding
+                with torch.no_grad():
                     self.model.encode_prompt(prompt)
                     self.model.get_time_ids()
+                    text_embed = self.model.prompt_embeds.to(device)
+                # text_embed = self.model.prompt_embeds.to(device).repeat(
+                #     (batch_size, 1, 1)
+                # )  # [B, 77, 1024]
 
-                num_inference_steps = 1
-                # Set time steps
-                self.model.scheduler.set_timesteps(num_inference_steps, device=device)
-                timesteps = self.model.scheduler.timesteps
-                #prepare latents
-                latents = torch.randn(field_latent.shape, 
-                                    generator=rand_num_generator, 
-                                    device=device, 
-                                    dtype=field_latent.dtype)
-                # scale the initial noise by the standard deviation required by the scheduler
-                latents = latents * self.model.scheduler.init_noise_sigma
+                added_cond_kwargs = {"text_embeds": self.model.add_text_embeds.to(device), "time_ids": self.model.add_time_ids.to(device)}
 
-                iterable = enumerate(timesteps)
+                # Concat field and rgb latents
+                cat_latents = torch.cat(
+                    [field_latent, noisy_latents], dim=1
+                )  # [B, 8, h, w]
+                cat_latents = cat_latents.to(device)   
 
-                add_text_embeds = self.model.add_text_embeds.to(device)
-                add_time_ids = self.model.add_time_ids.to(device)
-                prompt_embeds = self.model.prompt_embeds.to(device)
+
+                # Predict the noise residual
+                model_pred = self.model.unet(
+                    cat_latents, timesteps, text_embed, added_cond_kwargs=added_cond_kwargs,return_dict=False,
+                )[0]  # [B, 4, h, w]
 
                 
-                for i, t in iterable:
-                    # expand the latents if we are doing classifier free guidance
-                    latent_model_input = torch.cat([field_latent, latents], dim=1)
-                    latent_model_input = self.model.scheduler.scale_model_input(latent_model_input, t)
+                ## reverse the noisy step
 
-                    # predict the noise residual
-                    added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
+                sqrt_alpha_prod = self.training_noise_scheduler.alphas_cumprod[timesteps] ** 0.5
+                sqrt_alpha_prod = sqrt_alpha_prod.flatten()
+                while len(sqrt_alpha_prod.shape) < len(rgb_latent.shape):
+                    sqrt_alpha_prod = sqrt_alpha_prod.unsqueeze(-1)
 
-                    noise_pred = self.model.unet(
-                        latent_model_input,
-                        t,
-                        encoder_hidden_states= prompt_embeds,
-                        cross_attention_kwargs= None,
-                        added_cond_kwargs=added_cond_kwargs,
-                        return_dict=False,
-                    )[0]
+                sqrt_one_minus_alpha_prod = (1 - self.training_noise_scheduler.alphas_cumprod[timesteps]) ** 0.5
+                sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.flatten()
+                while len(sqrt_one_minus_alpha_prod.shape) < len(rgb_latent.shape):
+                    sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.unsqueeze(-1)
 
-
-                    # compute the previous noisy sample x_t -> x_t-1
-                    latents_dtype = latents.dtype
-                    latents = self.model.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
-                    if latents.dtype != latents_dtype:
-                        if torch.backends.mps.is_available():
-                            # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
-                            latents = latents.to(latents_dtype)
+                latents = (noisy_latents - sqrt_one_minus_alpha_prod * model_pred) / sqrt_alpha_prod 
+            
+                # decode the latents
+                latents = latents.to(torch.float16) / self.model.vae.config.scaling_factor
+                rgb = self.model.vae.decode(latents, return_dict=False)[0]   
 
 
-                    latents = latents / self.model.vae.config.scaling_factor
-                    rgb = self.model.vae.decode(latents, return_dict=False)[0]   
-
-                    # find the perspective field of the generated image
-                    rgb = torch.clip(rgb, -1.0, 1.0)
-                    rgb = ((rgb + 1.0) / 2.0).squeeze() * 255
-
-                    inputs = {"image": rgb, "height": rgb.shape[1], "width": rgb.shape[2]}
-
-                    
-                    generated_field = self.pf_model.forward([inputs])[0]
-                    
-                    latitude_map = generated_field['pred_latitude_original']
-                    gravity_maps = generated_field['pred_gravity_original']
-                    latitude_map = latitude_map / 90
-                        
-                    joined_maps = torch.cat([gravity_maps, latitude_map.unsqueeze(0),], dim = 0)
-                    joined_maps = joined_maps.unsqueeze(0)
-
-                    joined_maps = joined_maps.to(dtype=torch.float32)
+                # find the perspective field of the generated image
+                rgb = torch.clip(rgb, -1.0, 1.0)
+                rgb = ((rgb + 1.0) / 2.0).squeeze() * 255
 
 
-                    loss = self.pf_loss(joined_maps, field)
-                    self.train_metrics.update("loss", loss.item())
-                    
-                    loss = loss / self.gradient_accumulation_steps
-                
+                '''
+                image_pred = rgb.clone().detach().squeeze().cpu().permute(1,2,0).numpy()
+                image = Image.fromarray((image_pred).astype(np.uint8))
+                image.save("/share/data/p2p/zhiyanw/tmp/1.jpg")
+                '''
+
+                inputs = {"image": rgb, "height": rgb.shape[1], "width": rgb.shape[2]}
+                generated_field = self.pf_model.forward([inputs])[0]
+
+                latitude_map = generated_field['pred_latitude_original']
+                gravity_maps = generated_field['pred_gravity_original']
+                latitude_map = latitude_map / 90
+                joined_maps = torch.cat([gravity_maps, latitude_map.unsqueeze(0),], dim = 0)
+                joined_maps = joined_maps.unsqueeze(0)
+
+
+                # compute the loss
+                loss = self.pf_loss(joined_maps.to(torch.float32), field)
+                self.train_metrics.update("loss", loss.item())
+
+                loss = loss / self.gradient_accumulation_steps
                 self.scaler.scale(loss).backward()
                 accumulated_step += 1
 
@@ -413,7 +453,7 @@ class SDXLTrainer:
                     self.lr_scheduler.step()
                     self.scaler.update()
                     self.optimizer.zero_grad()
-                    accumulated_step = 0
+                    accumulated_step=0
 
                     self.effective_iter += 1
 
@@ -458,7 +498,7 @@ class SDXLTrainer:
                         logging.info("Time is up, training paused.")
                         return
                 
-                    print(f"Memory cached in GPU: {torch.cuda.memory_cached()}")
+                    #print(f"Memory cached in GPU: {torch.cuda.memory_cached()}")
                     
                     torch.cuda.empty_cache()
                     # <<< Effective batch end <<<
@@ -606,7 +646,7 @@ class SDXLTrainer:
             # Read input field
             # print(batch)
             # rgb_in = batch["image"].to(self.device).to(torch.float32)[:1]
-            field_in = batch["field"].to(self.device).to(torch.float16)[:1]
+            field_in = batch["field"].to(self.device)[:1]
             # [1, 3, H, W]
             prompt_in = batch['prompt']
 
