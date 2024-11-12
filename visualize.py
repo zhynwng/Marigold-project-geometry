@@ -319,7 +319,7 @@ if "__main__" == __name__:
     # -------------------- Model --------------------
     _pipeline_kwargs = cfg.pipeline.kwargs if cfg.pipeline.kwargs is not None else {}
     model = SDXLPipeline.from_pretrained(
-        os.path.join(base_ckpt_dir, cfg.model.pretrained_path), **_pipeline_kwargs, addition_embed_type = None, torch_dtype=torch.float16, #variant=variant, use_safetensors=True
+        os.path.join(base_ckpt_dir, cfg.model.pretrained_path), **_pipeline_kwargs, addition_embed_type = None, #variant=variant, use_safetensors=True
     )
 
     # -------------------- Trainer --------------------
@@ -349,11 +349,12 @@ if "__main__" == __name__:
     # -------------------- Checkpoint --------------------
     if resume_run is not None:
         trainer.load_checkpoint(
-            resume_run, load_trainer_state=True, resume_lr_scheduler=True
+            resume_run, load_trainer_state=True, resume_lr_scheduler=True, percision = "fp32"
         )
 
     # -------------------- Training & Evaluation Loop --------------------
     try:
+        logging.info("start visualizing")
         trainer.visualize_large(args.num, args.vis_out_dir)
     except Exception as e:
         logging.exception(e)

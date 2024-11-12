@@ -699,7 +699,7 @@ class SDXLTrainer:
             # Read input field
             # print(batch)
             # rgb_in = batch["image"].to(self.device).to(torch.float32)[:1]
-            field_in = batch["field"].to(self.device).to(torch.float16)[:1]
+            field_in = batch["field"].to(self.device)[:1]
             # [1, 3, H, W]
             prompt_in = batch['prompt']
 
@@ -799,7 +799,7 @@ class SDXLTrainer:
             logging.debug("Old checkpoint backup is removed.")
 
     def load_checkpoint(
-        self, ckpt_path, load_trainer_state=True, resume_lr_scheduler=True
+        self, ckpt_path, load_trainer_state=True, resume_lr_scheduler=True, percision = "fp16"
     ):
         logging.info(f"Loading checkpoint from: {ckpt_path}")
         # Load UNet
@@ -818,14 +818,15 @@ class SDXLTrainer:
         
         self.model.unet.load_state_dict(unet_state_dict)
         self.model.unet.to(self.device)
-        self.model.unet = self.model.unet.to(torch.float16)
 
-        self.model.unet.conv_in = Conv_in_32fp(self.model.unet.conv_in)
+        if (percision == "fp16"):
+            self.model.unet = self.model.unet.to(torch.float16)
+            self.model.unet.conv_in = Conv_in_32fp(self.model.unet.conv_in)
+            self.model.vae = AutoencoderKL.from_pretrained("/share/data/p2p/zhiyanw/sdxl-vae-fp16-fix", torch_dtype=torch.float16)
+
 
         # only upcast the conv_in layer
 
-
-        self.model.vae = AutoencoderKL.from_pretrained("/share/data/p2p/zhiyanw/sdxl-vae-fp16-fix", torch_dtype=torch.float16)
 
 
         logging.info(f"UNet parameters are loaded from {_model_path}")
