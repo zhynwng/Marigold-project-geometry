@@ -112,6 +112,17 @@ class SDXLTrainer:
             param.requires_grad = True
         '''
         
+        # Add new LoRA weights to the attention layers
+        # Set correct lora layers
+        unet_lora_config = LoraConfig(
+            r=256, # hardcode
+            lora_alpha=4, # hardcode
+            init_lora_weights="gaussian",
+            target_modules=["to_k", "to_q", "to_v", "to_out.0"],
+        )
+
+        self.model.unet.add_adapter(unet_lora_config)
+
         # Optimizer !should be defined after input layer is adapted
         lr = self.cfg.lr
         self.optimizer = Adam(self.model.unet.parameters(), lr=lr)
@@ -651,6 +662,96 @@ class SDXLTrainer:
             )
         return self.global_seed_sequence.pop()
 
+
+    def visualize_large(self, num = 100, vis_out_dir = None):
+        
+        if vis_out_dir == None:
+            vis_out_dir = os.path.join(
+                self.out_dir_vis, self._get_backup_ckpt_name()
+            )
+        os.makedirs(vis_out_dir, exist_ok=True)
+        _ = self.visualize_single_dataset(
+            num = num,
+            data_loader=self.vis_loaders[0],
+            metric_tracker=self.val_metrics,
+            save_to_dir=vis_out_dir,
+        )
+
+
+    @torch.no_grad()
+    def visualize_single_dataset(
+        self,
+        num,
+        data_loader: DataLoader,
+        metric_tracker: MetricTracker,
+        save_to_dir: str = None,
+    ):
+        self.model.to(self.device)
+        metric_tracker.reset()
+
+        # Generate seed sequence for consistent evaluation
+        val_init_seed = self.cfg.validation.init_seed
+        val_seed_ls = generate_seed_sequence(val_init_seed, len(data_loader))
+
+        logging.info("start visualizing images")
+
+        for i, batch in enumerate(
+            tqdm(data_loader, desc=f"evaluating on {data_loader.dataset.disp_name}"),
+        ):
+
+            if i >= num:
+                break
+            
+            # assert 1 == data_loader.batch_size
+            # Read input field
+            # print(batch)
+            # rgb_in = batch["image"].to(self.device).to(torch.float32)[:1]
+            field_in = batch["field"].to(self.device)[:1]
+            # [1, 3, H, W]
+            prompt_in = batch['prompt']
+
+            # Random number generator
+            seed = val_seed_ls.pop()
+            if seed is None:
+                generator = None
+            else:
+                generator = torch.Generator(device=self.device)
+                generator.manual_seed(seed)
+
+            # Predict image
+            pipe_out: SDXLOutput = self.model(
+                field_in,
+                input_prompt=prompt_in,
+                denoising_steps=self.cfg.validation.denoising_steps,
+                ensemble_size=self.cfg.validation.ensemble_size,
+                processing_res=self.cfg.validation.processing_res,
+                match_input_res=self.cfg.validation.match_input_res,
+                generator=generator,
+                batch_size=1,  # use batch size 1 to increase reproducibility
+                color_map=None,
+                show_progress_bar=False,
+                resample_method=self.cfg.validation.resample_method,
+            )
+
+            image_pred: Image.Image = pipe_out.image
+
+            if save_to_dir is not None:
+                output_dir_jpg = save_to_dir
+                os.makedirs(output_dir_jpg, exist_ok=True)
+
+            
+                 # save image
+                pred_name_base = str(i) + "_pred"
+                jpg_save_path = os.path.join(output_dir_jpg, f"{pred_name_base}.jpg")
+                if os.path.exists(jpg_save_path):
+                    logging.warning(f"Existing file: '{jpg_save_path}' will be overwritten")
+                image_pred.save(jpg_save_path)
+
+        return metric_tracker.result()
+
+
+
+
     def save_checkpoint(self, ckpt_name, save_train_state):
         ckpt_dir = os.path.join(self.out_dir_ckpt, ckpt_name)
         logging.info(f"Saving checkpoint to: {ckpt_dir}")
@@ -718,17 +819,6 @@ class SDXLTrainer:
         self.model.unet.to(self.device)
         logging.info(f"UNet parameters are loaded from {_model_path}")
 
-
-        # Add new LoRA weights to the attention layers
-        # Set correct lora layers
-        unet_lora_config = LoraConfig(
-            r=256, # hardcode
-            lora_alpha=4, # hardcode
-            init_lora_weights="gaussian",
-            target_modules=["to_k", "to_q", "to_v", "to_out.0"],
-        )
-
-        self.model.unet.add_adapter(unet_lora_config)
 
 
         # set optimizer after 
