@@ -298,7 +298,7 @@ class SDXLTrainer:
         accumulated_step = 0
 
 
-        #self.visualize(3)
+        self.visualize(3)
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
             logging.debug(f"epoch: {self.epoch}")
@@ -646,7 +646,7 @@ class SDXLTrainer:
             # Read input field
             # print(batch)
             # rgb_in = batch["image"].to(self.device).to(torch.float32)[:1]
-            field_in = batch["field"].to(self.device)[:1]
+            field_in = batch["field"].to(self.device).to(torch.float16)[:1]
             # [1, 3, H, W]
             prompt_in = batch['prompt']
 
