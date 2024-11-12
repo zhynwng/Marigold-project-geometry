@@ -107,10 +107,7 @@ class SDXLTrainer:
         self.model.unet.to(dtype=torch.float32)
 
 
-        self.model.unet.requires_grad_(False)
-
-
-        ''' 
+        '''
         for param in self.model.unet.conv_in.parameters():
             param.requires_grad = True
         '''
@@ -274,7 +271,7 @@ class SDXLTrainer:
         self.train_metrics.reset()
         accumulated_step = 0
 
-        self.visualize(1000)
+        #self.visualize(4)
 
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
@@ -283,7 +280,6 @@ class SDXLTrainer:
             # Skip previous batches when resume
             for batch in skip_first_batches(self.train_loader, self.n_batch_in_epoch):
                 # self.model.unet.train()
-
                 # globally consistent random generators
                 if self.seed is not None:
                     local_seed = self._get_next_seed()
@@ -313,11 +309,10 @@ class SDXLTrainer:
                     field_latent = self.model.encode_field(field)  # [B, 4, h, w]
 
                 # Sample a random timestep for each image
-                upper_timestep = int(0.5 * self.scheduler_timesteps)
-
+                    
                 timesteps = torch.randint(
                     0,
-                    upper_timestep,
+                    self.scheduler_timesteps,
                     (batch_size,),
                     device=device,
                     generator=rand_num_generator,
@@ -397,6 +392,8 @@ class SDXLTrainer:
 
                 self.n_batch_in_epoch += 1
                 # Practical batch end
+
+                #print(self.model.unet.up_blocks[0].attentions[1].transformer_blocks[3].attn1.to_out[0].lora_A.default.weight)
 
                 # Perform optimization step
                 if accumulated_step >= self.gradient_accumulation_steps:
@@ -726,14 +723,28 @@ class SDXLTrainer:
         # Set correct lora layers
         unet_lora_config = LoraConfig(
             r=256, # hardcode
-            lora_alpha=2.5, # hardcode
+            lora_alpha=4, # hardcode
             init_lora_weights="gaussian",
             target_modules=["to_k", "to_q", "to_v", "to_out.0"],
         )
 
         self.model.unet.add_adapter(unet_lora_config)
-        
+
+
+        # set optimizer after 
+        lr = self.cfg.lr
+        self.optimizer = Adam(self.model.unet.parameters(), lr=lr)
+
+        # LR scheduler
+        lr_func = IterExponential(
+            total_iter_length=self.cfg.lr_scheduler.kwargs.total_iter,
+            final_ratio=self.cfg.lr_scheduler.kwargs.final_ratio,
+            warmup_steps=self.cfg.lr_scheduler.kwargs.warmup_steps,
+        )
+        self.lr_scheduler = LambdaLR(optimizer=self.optimizer, lr_lambda=lr_func)
+
         # Load training states
+        '''
         if load_trainer_state:
             checkpoint = torch.load(os.path.join(ckpt_path, "trainer.ckpt"))
             self.effective_iter = checkpoint["effective_iter"]
@@ -744,13 +755,14 @@ class SDXLTrainer:
 
             self.best_metric = checkpoint["best_metric"]
 
-            self.optimizer.load_state_dict(checkpoint["optimizer"])
-            logging.info(f"optimizer state is loaded from {ckpt_path}")
+            #self.optimizer.load_state_dict(checkpoint["optimizer"])
+            #logging.info(f"optimizer state is loaded from {ckpt_path}")
 
-            if resume_lr_scheduler:
-                self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
-                logging.info(f"LR scheduler state is loaded from {ckpt_path}")
+            #if resume_lr_scheduler:
+            #    self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+            #    logging.info(f"LR scheduler state is loaded from {ckpt_path}")
 
+        '''
         logging.info(
             f"Checkpoint loaded from: {ckpt_path}. Resume from iteration {self.effective_iter} (epoch {self.epoch})"
         )
