@@ -21,7 +21,7 @@
 # --------------------------------------------------------------------------
 
 import io
-import os
+import os, sys
 import random
 import tarfile
 from enum import Enum
@@ -131,6 +131,7 @@ class BaseDepthDataset(Dataset):
 
         batch = {}
 
+        batch["index"] = prompt_index
         batch["image"] = self._read_image(img_rel_path)
         batch["field"] = self._read_image(field_rel_path)
         if self.prompts is not None:

@@ -663,7 +663,7 @@ class SDXLTrainer:
         return self.global_seed_sequence.pop()
 
 
-    def visualize_large(self, num = 100, vis_out_dir = None):
+    def visualize_large(self, start_num = 0, num = 100, vis_out_dir = None):
         
         if vis_out_dir == None:
             vis_out_dir = os.path.join(
@@ -671,6 +671,7 @@ class SDXLTrainer:
             )
         os.makedirs(vis_out_dir, exist_ok=True)
         _ = self.visualize_single_dataset(
+            start_num = start_num,
             num = num,
             data_loader=self.vis_loaders[0],
             metric_tracker=self.val_metrics,
@@ -681,6 +682,7 @@ class SDXLTrainer:
     @torch.no_grad()
     def visualize_single_dataset(
         self,
+        start_num,
         num,
         data_loader: DataLoader,
         metric_tracker: MetricTracker,
@@ -699,13 +701,20 @@ class SDXLTrainer:
             tqdm(data_loader, desc=f"evaluating on {data_loader.dataset.disp_name}"),
         ):
 
-            if i >= num:
+            if i < start_num:
+                continue
+            if i >= start_num+num:
                 break
             
+            index = batch["index"][0]
+            pred_name_base = str(index) + "_pred"
+            if os.path.exists(os.path.join(save_to_dir, f"{pred_name_base}.jpg")):
+                continue
+
             # assert 1 == data_loader.batch_size
             # Read input field
             # print(batch)
-            # rgb_in = batch["image"].to(self.device).to(torch.float32)[:1]
+            # rgb_in = batch["image"].to(self.device).to(torch.float32)[:1]           
             field_in = batch["field"].to(self.device)[:1]
             # [1, 3, H, W]
             prompt_in = batch['prompt']
@@ -741,7 +750,7 @@ class SDXLTrainer:
 
             
                  # save image
-                pred_name_base = str(i) + "_pred"
+                pred_name_base = str(index) + "_pred"
                 jpg_save_path = os.path.join(output_dir_jpg, f"{pred_name_base}.jpg")
                 if os.path.exists(jpg_save_path):
                     logging.warning(f"Existing file: '{jpg_save_path}' will be overwritten")

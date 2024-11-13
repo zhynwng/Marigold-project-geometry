@@ -3,4 +3,4 @@
 #SBATCH --gpus=8
 
 cd /share/data/p2p/yz5880/cvpr2025/Marigold-project-geometry/
-apptainer exec --mount type=bind,src=/scratch,dst=/scratch --mount type=bind,src=/share,dst=/share --nv /share/data/p2p/zhiyanw/container.sif bash batch_script.sh
+apptainer exec --mount type=bind,src=/scratch,dst=/scratch --mount type=bind,src=/share,dst=/share --nv /share/data/p2p/zhiyanw/new_container.sif bash batch_script.sh

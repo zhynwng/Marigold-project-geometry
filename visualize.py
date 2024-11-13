@@ -91,6 +91,12 @@ if "__main__" == __name__:
         default=10,
         help="number of images to visualize",
     )
+    parser.add_argument(
+        "--start_num",
+        type = int, 
+        default=0,
+        help="number of images to visualize",
+    )
 
     parser.add_argument(
         "--vis_out_dir",
@@ -163,7 +169,7 @@ if "__main__" == __name__:
             wandb_id = load_wandb_job_id(out_dir_run)
             wandb_cfg_dic = {
                 "id": wandb_id,
-                "resume": "must",
+                "resume": "allow",
                 **cfg.wandb,
             }
         else:
@@ -355,6 +361,6 @@ if "__main__" == __name__:
     # -------------------- Training & Evaluation Loop --------------------
     try:
         logging.info("start visualizing")
-        trainer.visualize_large(args.num, args.vis_out_dir)
+        trainer.visualize_large(args.start_num, args.num, args.vis_out_dir)
     except Exception as e:
         logging.exception(e)
