@@ -712,6 +712,9 @@ class SDXLTrainer:
             # [1, 3, H, W]
             prompt_in = batch['prompt']
 
+            depth_in = batch["depth"].to(self.device).to(torch.float32)[:1]
+
+
             # Random number generator
             seed = val_seed_ls.pop()
             if seed is None:
@@ -724,6 +727,7 @@ class SDXLTrainer:
             pipe_out: SDXLOutput = self.model(
                 field_in,
                 input_prompt=prompt_in,
+                input_depth=depth_in,
                 denoising_steps=self.cfg.validation.denoising_steps,
                 ensemble_size=self.cfg.validation.ensemble_size,
                 processing_res=self.cfg.validation.processing_res,
