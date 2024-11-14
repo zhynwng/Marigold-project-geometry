@@ -504,7 +504,7 @@ class SDXLPipeline(
 
         guidance_scale = 5.0
         # encode field 
-        #field_latent = self.encode_field(field_in)
+        field_latent = self.encode_field(field_in)
 
         # encode depth
         depth_latent = self.encode_depth(depth_in)
@@ -541,7 +541,7 @@ class SDXLPipeline(
 
         for i, t in iterable:
             # expand the latents if we are doing classifier free guidance
-            latent_model_input = torch.cat([depth_latent, latents], dim=1)
+            latent_model_input = torch.cat([depth_latent, field_latent, latents], dim=1)
             latent_model_input = torch.cat([latent_model_input] * 2)
             latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
