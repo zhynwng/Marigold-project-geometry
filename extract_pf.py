@@ -11,7 +11,7 @@ import time
 
 
 # Load filenames
-filename_ls_path = "/share/data/p2p/yz5880/Projective-Geometry-1024/Indoor_Real_1024/1K_images_list.txt"
+filename_ls_path = "/share/data/p2p/yz5880/classifier_ucla_baseline/test_set_256_prequalified/gen_images_list.txt"
 with open(filename_ls_path, "r") as f:
     content = f.readlines()
     lines = [l.strip() for l in content]
@@ -28,7 +28,7 @@ for fn in tqdm(lines):
 
     # Perform inference to get predictions
     predictions = pf_model.inference(img_bgr=img_bgr)
-    torch.save(predictions, "/share/data/p2p/yz5880/Projective-Geometry-1024/Indoor_Real_1024/field/"+fn.split('/')[-1].split('.')[0]+".pt")
+    torch.save(predictions, "/share/data/p2p/yz5880/classifier_ucla_baseline/test_set_256_prequalified/gen_256_pf/"+fn.split('/')[-1].split('.')[0].split("_")[-1]+".pt")
     
 
     # Draw and visualize the perspective fields based on the predictions
