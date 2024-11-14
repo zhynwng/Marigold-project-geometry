@@ -210,6 +210,12 @@ class BaseDepthDataset(Dataset):
         depth = Image.open(depth_rel_path).convert('L')  # [H, W]
         depth = np.asarray(depth).astype(float)
 
+        depth = torch.Tensor(depth)
+
+        depth_min, depth_max = torch.amin(depth, dim=[0, 1], keepdim=True), torch.amax(depth, dim=[0, 1], keepdim=True)
+        depth = 2. * (depth - depth_min) / (depth_max - depth_min) - 1.
+        assert depth.min() >= -1.0 and depth.max() <= 1.0
+
         return depth
 
         

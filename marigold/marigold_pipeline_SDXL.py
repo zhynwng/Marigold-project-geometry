@@ -504,7 +504,7 @@ class SDXLPipeline(
 
         guidance_scale = 5.0
         # encode field 
-        field_latent = self.encode_field(field_in)
+        #field_latent = self.encode_field(field_in)
 
         # encode depth
         depth_latent = self.encode_depth(depth_in)
@@ -517,7 +517,7 @@ class SDXLPipeline(
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps
         #prepare latents
-        latents = torch.randn(field_latent.shape, generator=generator, device=device, dtype=self.prompt_embeds.dtype)
+        latents = torch.randn(depth_latent.shape, generator=generator, device=device, dtype=self.prompt_embeds.dtype)
         # scale the initial noise by the standard deviation required by the scheduler
         latents = latents * self.scheduler.init_noise_sigma
 
@@ -541,7 +541,7 @@ class SDXLPipeline(
 
         for i, t in iterable:
             # expand the latents if we are doing classifier free guidance
-            latent_model_input = torch.cat([depth_latent, field_latent, latents], dim=1)
+            latent_model_input = torch.cat([depth_latent, latents], dim=1)
             latent_model_input = torch.cat([latent_model_input] * 2)
             latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 

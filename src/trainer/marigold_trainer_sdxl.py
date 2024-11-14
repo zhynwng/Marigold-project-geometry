@@ -90,7 +90,7 @@ class SDXLTrainer:
         self.accumulation_steps: int = accumulation_steps
 
         # Adapt input layers
-        if 12 != self.model.unet.config["in_channels"]:
+        if 8 != self.model.unet.config["in_channels"]:
             self._replace_unet_conv_in_zero_intialization()
 
         # Encode empty text prompt
@@ -229,19 +229,18 @@ class SDXLTrainer:
         _weight = self.model.unet.conv_in.weight.clone()  # [320, 4, 3, 3]
         _bias = self.model.unet.conv_in.bias.clone()  # [320]
         _weight_add_1 = torch.zeros((320, 4, 3, 3))
-        _weight_add_2 = torch.zeros((320, 4, 3, 3))
-        _weight = torch.cat((_weight_add_1, _weight_add_2, _weight), 1) # [320, 12, 3, 3]
+        _weight = torch.cat((_weight_add_1, _weight), 1) # [320, 12, 3, 3]
         # new conv_in channel
         _n_convin_out_channel = self.model.unet.conv_in.out_channels
         _new_conv_in = Conv2d(
-            12, _n_convin_out_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
+            8, _n_convin_out_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
         )
         _new_conv_in.weight = Parameter(_weight)
         _new_conv_in.bias = Parameter(_bias)
         self.model.unet.conv_in = _new_conv_in
         logging.info("Unet conv_in layer is replaced")
         # replace config
-        self.model.unet.config["in_channels"] = 12
+        self.model.unet.config["in_channels"] = 8
         logging.info("Unet config is updated with zero initialization")
         return
 
@@ -303,7 +302,7 @@ class SDXLTrainer:
 
                 # Get data
                 rgb = batch["image"].to(device).to(torch.float32)
-                field = batch["field"].to(device).to(torch.float32)
+                #field = batch["field"].to(device).to(torch.float32)
                 depth = batch["depth"].to(device).to(torch.float32)
                 prompt = batch["prompt"]
 
@@ -313,12 +312,13 @@ class SDXLTrainer:
                 assert rgb_norm.min() >= -1.0 and rgb_norm.max() <= 1.0
 
 
+
                 batch_size = rgb.shape[0]
                 with torch.no_grad():
                     # Encode image
                     rgb_latent = self.model.encode_rgb(rgb_norm)  # [B, 4, h, w]
                     # Encode field depth
-                    field_latent = self.model.encode_field(field)  # [B, 4, h, w]
+                    #field_latent = self.model.encode_field(field)  # [B, 4, h, w]
                     # Encode depth latent
                     depth_latent =self.model.encode_depth(depth)
 
@@ -340,7 +340,7 @@ class SDXLTrainer:
                         # calculate strength depending on t
                         strength = strength * (timesteps / self.scheduler_timesteps)
                     noise = multi_res_noise_like(
-                        field_latent,
+                        depth_latent,
                         strength=strength,
                         downscale_strategy=self.mr_noise_downscale_strategy,
                         generator=rand_num_generator,
@@ -370,7 +370,7 @@ class SDXLTrainer:
 
                 # Concat field and rgb latents
                 cat_latents = torch.cat(
-                    [depth_latent, field_latent, noisy_latents], dim=1
+                    [depth_latent, noisy_latents], dim=1
                 )  # [B, 8, h, w]
                 cat_latents = cat_latents.float().to(device)     
 
