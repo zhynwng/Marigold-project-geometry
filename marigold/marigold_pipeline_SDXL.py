@@ -216,6 +216,7 @@ class SDXLPipeline(
         self,
         input_field: Union[Image.Image, torch.Tensor, None],
         input_prompt: Optional[str] = None,
+        input_depth: Union[Image.Image, torch.Tensor, None] = None,
         denoising_steps: Optional[int] = None,
         ensemble_size: int = 5,
         processing_res: Optional[int] = None,
@@ -325,6 +326,7 @@ class SDXLPipeline(
             (batched_field,) = batch
             image_pred = self.single_infer(
                 field_in=batched_field,
+                depth_in = input_depth,
                 prompt_in=input_prompt,
                 num_inference_steps=denoising_steps,
                 show_pbar=show_progress_bar,
@@ -476,6 +478,7 @@ class SDXLPipeline(
     def single_infer(
         self,
         field_in: torch.Tensor,
+        depth_in: torch.Tensor,
         num_inference_steps: int,
         generator: Union[torch.Generator, None],
         show_pbar: bool,
@@ -502,6 +505,9 @@ class SDXLPipeline(
         guidance_scale = 5.0
         # encode field 
         field_latent = self.encode_field(field_in)
+
+        # encode depth
+        depth_latent = self.encode_depth(depth_in)
 
         # if self.prompt_embeds is None:
         self.encode_prompt(prompt_in)
@@ -535,7 +541,7 @@ class SDXLPipeline(
 
         for i, t in iterable:
             # expand the latents if we are doing classifier free guidance
-            latent_model_input = torch.cat([field_latent, latents], dim=1)
+            latent_model_input = torch.cat([depth_latent, field_latent, latents], dim=1)
             latent_model_input = torch.cat([latent_model_input] * 2)
             latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
@@ -567,6 +573,15 @@ class SDXLPipeline(
 
         return image
 
+
+    def encode_depth(self, depth_in: torch.Tensor) -> torch.Tensor:
+
+        depth_in = depth_in.unsqueeze(1)
+        depth_in = depth_in.repeat(1, 3, 1, 1)
+
+        latent = self.encode_rgb(depth_in)
+
+        return latent
 
 
     def encode_rgb(self, rgb_in: torch.Tensor) -> torch.Tensor:
@@ -616,3 +631,5 @@ class SDXLPipeline(
         image = self.vae.decode(latents, return_dict=False)[0]
 
         return image
+
+

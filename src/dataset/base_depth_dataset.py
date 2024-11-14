@@ -106,6 +106,7 @@ class BaseDepthDataset(Dataset):
             self.filenames = [
                 s.split() for s in f.readlines()
             ]  # [['rgb.png', 'depth.tif'], [], ...]
+
         if self.prompt_ls_path is not None:
             with open(self.prompt_ls_path, "r") as p:
                 self.prompts = json.load(p)
@@ -126,7 +127,7 @@ class BaseDepthDataset(Dataset):
         return batch
 
     def _get_data_item(self, index):
-        img_rel_path, field_rel_path, filled_rel_path = self._get_data_path(index=index)
+        img_rel_path, field_rel_path, depth_rel_path, filled_rel_path = self._get_data_path(index=index)
         prompt_index = img_rel_path.split('/')[-1].split('.')[0]
 
         batch = {}
@@ -134,6 +135,7 @@ class BaseDepthDataset(Dataset):
         batch["index"] = prompt_index
         batch["image"] = self._read_image(img_rel_path)
         batch["field"] = self._read_image(field_rel_path)
+        batch["depth"] = self.read_depth(depth_rel_path)
         if self.prompts is not None:
             batch["prompt"] = self.prompts[prompt_index]
         else:
@@ -174,13 +176,12 @@ class BaseDepthDataset(Dataset):
         # Get data path
         rgb_rel_path = filename_line[0]
 
-        depth_rel_path, filled_rel_path = None, None
+        field_rel_path, filled_rel_path = None, None
         if DatasetMode.RGB_ONLY != self.mode:
-            depth_rel_path = filename_line[1]
-            if self.has_filled_depth:
-                filled_rel_path = filename_line[2]
+            field_rel_path = filename_line[1]
+            depth_rel_path = filename_line[2]
                 
-        return rgb_rel_path, depth_rel_path, filled_rel_path
+        return rgb_rel_path, field_rel_path, depth_rel_path, filled_rel_path
 
     def _read_image(self, img_rel_path) -> np.ndarray:
         if self.is_tar:
@@ -204,6 +205,15 @@ class BaseDepthDataset(Dataset):
 
         image = np.asarray(image)
         return image
+    
+    def read_depth(self, depth_rel_path) -> np.ndarray:
+        depth = Image.open(depth_rel_path).convert('L')  # [H, W]
+        depth = np.asarray(depth).astype(float)
+
+        return depth
+
+        
+        
 
     def transform_maps(self, latitude_map, gravity_maps):
         latitude_map = latitude_map / 90

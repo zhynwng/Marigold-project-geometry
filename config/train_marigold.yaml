@@ -36,8 +36,8 @@ trainer:
     pretrained_path: stable-diffusion-xl-base-1.0 # stable-diffusion-2
   init_seed: 2024  # use null to train w/o seeding
   save_period: 200
-  backup_period: 2000
-  validation_period: 2000
+  backup_period: 1000
+  validation_period: 1000
   visualization_period: 200
 
 multi_res_noise:

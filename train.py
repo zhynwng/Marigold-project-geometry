@@ -257,7 +257,6 @@ if "__main__" == __name__:
     # depth_transform: DepthNormalizerBase = get_depth_normalizer(
     #     cfg_normalizer=cfg.depth_normalization
     # )
-    print(cfg_data.train)
     train_dataset: BaseDepthDataset = get_dataset(
         cfg_data.train,
         base_data_dir=base_data_dir,

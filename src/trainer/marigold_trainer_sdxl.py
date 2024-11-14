@@ -90,7 +90,7 @@ class SDXLTrainer:
         self.accumulation_steps: int = accumulation_steps
 
         # Adapt input layers
-        if 8 != self.model.unet.config["in_channels"]:
+        if 12 != self.model.unet.config["in_channels"]:
             self._replace_unet_conv_in_zero_intialization()
 
         # Encode empty text prompt
@@ -103,15 +103,9 @@ class SDXLTrainer:
         self.model.vae.requires_grad_(False)
         self.model.text_encoder.requires_grad_(False)
         self.model.text_encoder_2.requires_grad_(False)
-        self.model.unet.train()
-        self.model.unet.to(dtype=torch.float32)
-
+        self.model.unet.requires_grad_(False)
 
         '''
-        for param in self.model.unet.conv_in.parameters():
-            param.requires_grad = True
-        '''
-        
         # Add new LoRA weights to the attention layers
         # Set correct lora layers
         unet_lora_config = LoraConfig(
@@ -123,6 +117,11 @@ class SDXLTrainer:
 
         self.model.unet.add_adapter(unet_lora_config)
 
+    
+        '''
+        for param in self.model.unet.conv_in.parameters():
+            param.requires_grad = True
+        
         # Optimizer !should be defined after input layer is adapted
         lr = self.cfg.lr
         self.optimizer = Adam(self.model.unet.parameters(), lr=lr)
@@ -229,19 +228,20 @@ class SDXLTrainer:
         # replace the first layer to accept 8 in_channels
         _weight = self.model.unet.conv_in.weight.clone()  # [320, 4, 3, 3]
         _bias = self.model.unet.conv_in.bias.clone()  # [320]
-        _weight_add = torch.zeros((320, 4, 3, 3))
-        _weight = torch.cat((_weight_add, _weight), 1) # [320, 8, 3, 3]
+        _weight_add_1 = torch.zeros((320, 4, 3, 3))
+        _weight_add_2 = torch.zeros((320, 4, 3, 3))
+        _weight = torch.cat((_weight_add_1, _weight_add_2, _weight), 1) # [320, 12, 3, 3]
         # new conv_in channel
         _n_convin_out_channel = self.model.unet.conv_in.out_channels
         _new_conv_in = Conv2d(
-            8, _n_convin_out_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
+            12, _n_convin_out_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
         )
         _new_conv_in.weight = Parameter(_weight)
         _new_conv_in.bias = Parameter(_bias)
         self.model.unet.conv_in = _new_conv_in
         logging.info("Unet conv_in layer is replaced")
         # replace config
-        self.model.unet.config["in_channels"] = 8
+        self.model.unet.config["in_channels"] = 12
         logging.info("Unet config is updated with zero initialization")
         return
 
@@ -282,7 +282,7 @@ class SDXLTrainer:
         self.train_metrics.reset()
         accumulated_step = 0
 
-        #self.visualize(4)
+        self.visualize(2)
 
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
@@ -304,6 +304,7 @@ class SDXLTrainer:
                 # Get data
                 rgb = batch["image"].to(device).to(torch.float32)
                 field = batch["field"].to(device).to(torch.float32)
+                depth = batch["depth"].to(device).to(torch.float32)
                 prompt = batch["prompt"]
 
                 # normalize rgb 
@@ -318,12 +319,15 @@ class SDXLTrainer:
                     rgb_latent = self.model.encode_rgb(rgb_norm)  # [B, 4, h, w]
                     # Encode field depth
                     field_latent = self.model.encode_field(field)  # [B, 4, h, w]
+                    # Encode depth latent
+                    depth_latent =self.model.encode_depth(depth)
 
                 # Sample a random timestep for each image
                     
+                upper_timestep = int(0.5 * self.scheduler_timesteps)
                 timesteps = torch.randint(
                     0,
-                    self.scheduler_timesteps,
+                    upper_timestep,
                     (batch_size,),
                     device=device,
                     generator=rand_num_generator,
@@ -366,7 +370,7 @@ class SDXLTrainer:
 
                 # Concat field and rgb latents
                 cat_latents = torch.cat(
-                    [field_latent, noisy_latents], dim=1
+                    [depth_latent, field_latent, noisy_latents], dim=1
                 )  # [B, 8, h, w]
                 cat_latents = cat_latents.float().to(device)     
 
@@ -593,6 +597,9 @@ class SDXLTrainer:
             # [1, 3, H, W]
             prompt_in = batch['prompt']
 
+            # depth
+            depth_in = batch["depth"].to(self.device).to(torch.float32)[:1]
+
             # Random number generator
             seed = val_seed_ls.pop()
             if seed is None:
@@ -605,6 +612,7 @@ class SDXLTrainer:
             pipe_out: SDXLOutput = self.model(
                 field_in,
                 input_prompt=prompt_in,
+                input_depth=depth_in,
                 denoising_steps=self.cfg.validation.denoising_steps,
                 ensemble_size=self.cfg.validation.ensemble_size,
                 processing_res=self.cfg.validation.processing_res,
@@ -622,31 +630,14 @@ class SDXLTrainer:
 
             if save_to_dir is not None:
                 output_dir_jpg = os.path.join(save_to_dir, "image")
-                output_dir_field = os.path.join(save_to_dir, "field")
-                output_dir_vis = os.path.join(save_to_dir, "field_visualization")
                 os.makedirs(output_dir_jpg, exist_ok=True)
-                os.makedirs(output_dir_field, exist_ok=True)
-                os.makedirs(output_dir_vis, exist_ok=True)
-
                 
-                 # save image
+                # save image
                 pred_name_base = str(i) + "_pred"
                 jpg_save_path = os.path.join(output_dir_jpg, f"{pred_name_base}.jpg")
                 if os.path.exists(jpg_save_path):
                     logging.warning(f"Existing file: '{jpg_save_path}' will be overwritten")
                 image_pred.save(jpg_save_path)
-
-                # Save field                
-                field_save_path = os.path.join(output_dir_field, f"{pred_name_base}.pt")
-                if os.path.exists(field_save_path):
-                    logging.warning(f"Existing file: '{field_save_path}' will be overwritten")
-                torch.save(field_pred, field_save_path,)
-
-                # save visualized image
-                vis_save_path = os.path.join(output_dir_vis, f"{pred_name_base}.jpg")
-                if os.path.exists(vis_save_path):
-                    logging.warning(f"Existing file: '{vis_save_path}' will be overwritten")
-                vis_pred.save(vis_save_path)
 
         return metric_tracker.result()
         
@@ -828,6 +819,10 @@ class SDXLTrainer:
         self.model.unet.to(self.device)
         logging.info(f"UNet parameters are loaded from {_model_path}")
 
+
+
+        for param in self.model.unet.conv_in.parameters():
+            param.requires_grad = True
 
 
         # set optimizer after 
