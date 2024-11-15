@@ -283,7 +283,7 @@ class SDXLTrainer:
         self.train_metrics.reset()
         accumulated_step = 0
 
-        self.visualize(2)
+        self.visualize(20)
 
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
