@@ -134,8 +134,8 @@ class BaseDepthDataset(Dataset):
 
         batch["index"] = prompt_index
         batch["image"] = self._read_image(img_rel_path)
-        batch["field"] = self._read_image(field_rel_path)
-        batch["depth"] = self.read_depth(depth_rel_path)
+        batch["field"] = self._read_image(img_rel_path)
+        batch["depth"] = self._read_image(depth_rel_path)
         if self.prompts is not None:
             batch["prompt"] = self.prompts[prompt_index]
         else:
@@ -207,7 +207,8 @@ class BaseDepthDataset(Dataset):
         return image
     
     def read_depth(self, depth_rel_path) -> np.ndarray:
-        depth = Image.open(depth_rel_path).convert('L')  # [H, W]
+        depth = Image.open(depth_rel_path)
+        depth = depth.convert('L')  # [H, W]
         depth = np.asarray(depth).astype(float)
 
         depth = torch.Tensor(depth)

@@ -90,7 +90,7 @@ class SDXLTrainer:
         self.accumulation_steps: int = accumulation_steps
 
         # Adapt input layers
-        if 12 != self.model.unet.config["in_channels"]:
+        if 8 != self.model.unet.config["in_channels"]:
             self._replace_unet_conv_in_zero_intialization()
 
         # Encode empty text prompt
@@ -229,20 +229,19 @@ class SDXLTrainer:
         _weight = self.model.unet.conv_in.weight.clone()  # [320, 4, 3, 3]
         _bias = self.model.unet.conv_in.bias.clone()  # [320]
         _weight_add_1 = torch.zeros((320, 4, 3, 3))
-        _weight_add_2 = torch.zeros((320, 4, 3, 3))
 
-        _weight = torch.cat((_weight_add_1, _weight_add_2, _weight), 1) # [320, 12, 3, 3]
+        _weight = torch.cat((_weight_add_1, _weight), 1) # [320, 12, 3, 3]
         # new conv_in channel
         _n_convin_out_channel = self.model.unet.conv_in.out_channels
         _new_conv_in = Conv2d(
-            12, _n_convin_out_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
+            8, _n_convin_out_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
         )
         _new_conv_in.weight = Parameter(_weight)
         _new_conv_in.bias = Parameter(_bias)
         self.model.unet.conv_in = _new_conv_in
         logging.info("Unet conv_in layer is replaced")
         # replace config
-        self.model.unet.config["in_channels"] = 12
+        self.model.unet.config["in_channels"] = 8
         logging.info("Unet config is updated with zero initialization")
         return
 
@@ -283,7 +282,7 @@ class SDXLTrainer:
         self.train_metrics.reset()
         accumulated_step = 0
 
-        self.visualize(20)
+        self.visualize(10)
 
         for epoch in range(self.epoch, self.max_epoch + 1):
             self.epoch = epoch
@@ -304,7 +303,7 @@ class SDXLTrainer:
 
                 # Get data
                 rgb = batch["image"].to(device).to(torch.float32)
-                field = batch["field"].to(device).to(torch.float32)
+                #field = batch["field"].to(device).to(torch.float32)
                 depth = batch["depth"].to(device).to(torch.float32)
                 prompt = batch["prompt"]
 
@@ -320,9 +319,9 @@ class SDXLTrainer:
                     # Encode image
                     rgb_latent = self.model.encode_rgb(rgb_norm)  # [B, 4, h, w]
                     # Encode field depth
-                    field_latent = self.model.encode_field(field)  # [B, 4, h, w]
+                    #field_latent = self.model.encode_field(field)  # [B, 4, h, w]
                     # Encode depth latent
-                    depth_latent =self.model.encode_depth(depth)
+                    depth_latent =self.model.encode_rgb(depth)
 
                 # Sample a random timestep for each image
                     
@@ -372,7 +371,7 @@ class SDXLTrainer:
 
                 # Concat field and rgb latents
                 cat_latents = torch.cat(
-                    [depth_latent, field_latent, noisy_latents], dim=1
+                    [depth_latent, noisy_latents], dim=1
                 )  # [B, 8, h, w]
                 cat_latents = cat_latents.float().to(device)     
 
@@ -830,21 +829,8 @@ class SDXLTrainer:
         for param in self.model.unet.conv_in.parameters():
             param.requires_grad = True
 
-
-        # set optimizer after 
-        lr = self.cfg.lr
-        self.optimizer = Adam(self.model.unet.parameters(), lr=lr)
-
-        # LR scheduler
-        lr_func = IterExponential(
-            total_iter_length=self.cfg.lr_scheduler.kwargs.total_iter,
-            final_ratio=self.cfg.lr_scheduler.kwargs.final_ratio,
-            warmup_steps=self.cfg.lr_scheduler.kwargs.warmup_steps,
-        )
-        self.lr_scheduler = LambdaLR(optimizer=self.optimizer, lr_lambda=lr_func)
-
         # Load training states
-        '''
+
         if load_trainer_state:
             checkpoint = torch.load(os.path.join(ckpt_path, "trainer.ckpt"))
             self.effective_iter = checkpoint["effective_iter"]
@@ -862,7 +848,7 @@ class SDXLTrainer:
             #    self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
             #    logging.info(f"LR scheduler state is loaded from {ckpt_path}")
 
-        '''
+    
         logging.info(
             f"Checkpoint loaded from: {ckpt_path}. Resume from iteration {self.effective_iter} (epoch {self.epoch})"
         )

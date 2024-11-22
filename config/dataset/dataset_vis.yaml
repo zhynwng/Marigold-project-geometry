@@ -3,6 +3,6 @@ dataset:
   - name: kandinsky_indoor_field
     disp_name: mini
     dir: /share/data/p2p/yz5880/Projective-Geometry-1024/Indoor_Real_1024
-    filenames: /share/data/p2p/yz5880/Projective-Geometry-1024/Indoor_Real_1024/depth_vis.txt
+    filenames: /share/data/p2p/zhiyanw/LF.txt
     has_filled_depth: false
     promptlist: /share/data/p2p/yz5880/captions_400k.json
