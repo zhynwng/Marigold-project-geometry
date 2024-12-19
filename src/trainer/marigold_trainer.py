@@ -96,6 +96,7 @@ class MarigoldSD3Trainer:
         self.weighting_scheme = "logit_normal"
         self.do_classifier_free_guidance = True
         self.train_text_encoder = False
+        self.precondition_outputs = True
 
         # Adapt input layers
         if 32 != self.model.transformer.config["in_channels"]:
@@ -105,7 +106,7 @@ class MarigoldSD3Trainer:
         # self.model.encode_empty_text()
         # self.empty_text_embed = self.model.empty_text_embed.detach().clone().to(device)
 
-        self.model.transformer.enable_xformers_memory_efficient_attention()
+        # self.model.transformer.enable_xformers_memory_efficient_attention()
 
         # Trainability
         self.model.vae.requires_grad_(False)
@@ -344,16 +345,7 @@ class MarigoldSD3Trainer:
                 # cat_latents =  self.model.scheduler.scale_model_input(cat_latents, timesteps)
 
                 # Predict the noise residual
-                # print("cat latents", cat_latents.shape)
-                # print("timesteps", timesteps)
-                # print("prompt_embeds", prompt_embeds.shape)
-                # print("pooled_prompt_embeds", pooled_prompt_embeds.shape)
-                # print("transformer class", type(self.model.transformer))
                 device = torch.device("cuda")
-                cat_latents = torch.randn(1, 32, 128, 128).to(device).half()
-                timesteps = torch.tensor([453.9749]).to(device).half()
-                prompt_embeds = torch.randn(1, 154, 4096).to(device).half()
-                pooled_prompt_embeds = torch.randn(1, 2048).to(device).half()
                 model_pred = self.model.transformer(
                     hidden_states=cat_latents,
                     timestep=timesteps,
@@ -366,8 +358,8 @@ class MarigoldSD3Trainer:
 
                 # Follow: Section 5 of https://arxiv.org/abs/2206.00364.
                 # Preconditioning of the model outputs.
-                if self.precondition_outputs:
-                    model_pred = model_pred * (-sigmas) + noisy_latents
+                # if self.precondition_outputs:
+                    # model_pred = model_pred * (-sigmas) + noisy_latents
                 # these weighting schemes use a uniform timestep sampling
                 # and instead post-weight the loss
                 # weighting = compute_loss_weighting_for_sd3(weighting_scheme=self.weighting_scheme, sigmas=sigmas)

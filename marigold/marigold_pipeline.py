@@ -50,6 +50,7 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from diffusers.models.transformers import SD3Transformer2DModel
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from diffusers.image_processor import VaeImageProcessor
+from diffusers import StableDiffusion3Pipeline
 
 from .util.batchsize import find_batch_size
 from .util.ensemble import ensemble_depth
@@ -141,7 +142,7 @@ def retrieve_timesteps(
     return timesteps, num_inference_steps
 
 
-class MarigoldSD3Pipeline(DiffusionPipeline):
+class MarigoldSD3Pipeline(StableDiffusion3Pipeline): # (DiffusionPipeline)
     """
     Pipeline for monocular depth estimation using Marigold: https://marigoldmonodepth.github.io.
 
@@ -200,7 +201,15 @@ class MarigoldSD3Pipeline(DiffusionPipeline):
         default_denoising_steps: Optional[int] = None,
         default_processing_resolution: Optional[int] = None,
     ):
-        super().__init__()
+        super().__init__(transformer=transformer,
+                         scheduler=scheduler,
+                         vae=vae,
+                         text_encoder=text_encoder,
+                         tokenizer=tokenizer,
+                         tokenizer_2=tokenizer_2,
+                         tokenizer_3=tokenizer_3,
+                         text_encoder_2=text_encoder_2,
+                         text_encoder_3=text_encoder_3)
         self.register_modules(
             vae=vae,
             text_encoder=text_encoder,
@@ -245,6 +254,7 @@ class MarigoldSD3Pipeline(DiffusionPipeline):
         self.tokenizers = [self.tokenizer, self.tokenizer_2, self.tokenizer_3]
         self.text_encoders = [self.text_encoder, self.text_encoder_2, self.text_encoder_3]
         self.max_sequence_length = 77
+        self.transformer = SD3Transformer2DModel().half()
 
 
     @property

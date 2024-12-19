@@ -34,6 +34,7 @@ from tqdm import tqdm
 
 # from marigold.finetune_pipeline import FinetunePipeline
 from marigold.marigold_pipeline import MarigoldSD3Pipeline
+# from diffusers import StableDiffusion3Pipeline
 
 from src.dataset import BaseDepthDataset, DatasetMode, get_dataset
 from src.dataset.mixed_sampler import MixedBatchSampler
@@ -324,9 +325,13 @@ if "__main__" == __name__:
         vis_loaders.append(_vis_loader)
 
     # -------------------- Model --------------------
-    _pipeline_kwargs = cfg.pipeline.kwargs if cfg.pipeline.kwargs is not None else {}
+    # _pipeline_kwargs = cfg.pipeline.kwargs if cfg.pipeline.kwargs is not None else {}
     model = MarigoldSD3Pipeline.from_pretrained(
-        os.path.join(base_ckpt_dir, cfg.model.pretrained_path), **_pipeline_kwargs, torch_dtype=torch.float16, # variant=variant, use_safetensors=True
+        # os.path.join(base_ckpt_dir, cfg.model.pretrained_path), 
+        "stabilityai/stable-diffusion-3-medium-diffusers",
+        # **_pipeline_kwargs, 
+        torch_dtype=torch.float16, # variant=variant, use_safetensors=True,
+        cache_dir="/share/data/p2p/yz5880/"
     )
 
     # -------------------- Trainer --------------------
