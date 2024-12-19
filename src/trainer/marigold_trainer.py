@@ -24,13 +24,16 @@
 
 import logging
 import os
+import sys
 import shutil
 from datetime import datetime
 from typing import List, Union
+import copy
 
 import numpy as np
 import torch
 from diffusers import DDPMScheduler
+from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from omegaconf import OmegaConf
 from torch.nn import Conv2d
 from torch.nn.parameter import Parameter
@@ -40,7 +43,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from PIL import Image
 
-from marigold.marigold_pipeline import MarigoldPipeline, MarigoldOutput
+from marigold.marigold_pipeline import MarigoldSD3Pipeline, MarigoldOutput
 from src.util import metric
 from src.util.data_loader import skip_first_batches
 from src.util.logging_util import tb_logger, eval_dic_to_text
@@ -48,15 +51,23 @@ from src.util.loss import get_loss
 from src.util.lr_scheduler import IterExponential
 from src.util.metric import MetricTracker
 from src.util.multi_res_noise import multi_res_noise_like
-from src.util.alignment import align_depth_least_square
+# from src.util.alignment import align_depth_least_square
 from src.util.seeding import generate_seed_sequence
 
+from diffusers.training_utils import (
+    _set_state_dict_into_text_encoder,
+    cast_training_params,
+    compute_density_for_timestep_sampling,
+    compute_loss_weighting_for_sd3,
+    free_memory,
+)
 
-class MarigoldTrainer:
+
+class MarigoldSD3Trainer:
     def __init__(
         self,
         cfg: OmegaConf,
-        model: MarigoldPipeline,
+        model: MarigoldSD3Pipeline,
         train_dataloader: DataLoader,
         device,
         base_ckpt_dir,
@@ -66,9 +77,10 @@ class MarigoldTrainer:
         accumulation_steps: int,
         val_dataloaders: List[DataLoader] = None,
         vis_dataloaders: List[DataLoader] = None,
+        precondition_args: int = 1,
     ):
         self.cfg: OmegaConf = cfg
-        self.model: MarigoldPipeline = model
+        self.model: MarigoldSD3Pipeline = model
         self.device = device
         self.seed: Union[int, None] = (
             self.cfg.trainer.init_seed
@@ -80,25 +92,34 @@ class MarigoldTrainer:
         self.val_loaders: List[DataLoader] = val_dataloaders
         self.vis_loaders: List[DataLoader] = vis_dataloaders
         self.accumulation_steps: int = accumulation_steps
+        self.precondition_args = precondition_args
+        self.weighting_scheme = "logit_normal"
+        self.do_classifier_free_guidance = True
+        self.train_text_encoder = False
 
         # Adapt input layers
-        if 8 != self.model.unet.config["in_channels"]:
-            self._replace_unet_conv_in_zero_intialization()
+        if 32 != self.model.transformer.config["in_channels"]:
+            self._replace_transformer_conv_in_zero_intialization()
 
         # Encode empty text prompt
-        self.model.encode_empty_text()
-        self.empty_text_embed = self.model.empty_text_embed.detach().clone().to(device)
+        # self.model.encode_empty_text()
+        # self.empty_text_embed = self.model.empty_text_embed.detach().clone().to(device)
 
-        self.model.unet.enable_xformers_memory_efficient_attention()
+        self.model.transformer.enable_xformers_memory_efficient_attention()
 
         # Trainability
         self.model.vae.requires_grad_(False)
         self.model.text_encoder.requires_grad_(False)
-        self.model.unet.requires_grad_(True)
+        self.model.text_encoder_2.requires_grad_(False)
+        self.model.text_encoder_3.requires_grad_(False)
+        self.model.transformer.requires_grad_(False)
+
+        for param in self.model.transformer.pos_embed.proj.parameters():
+            param.requires_grad = True
 
         # Optimizer !should be defined after input layer is adapted
         lr = self.cfg.lr
-        self.optimizer = Adam(self.model.unet.parameters(), lr=lr)
+        self.optimizer = Adam(self.model.transformer.parameters(), lr=lr)
 
         # LR scheduler
         lr_func = IterExponential(
@@ -112,17 +133,17 @@ class MarigoldTrainer:
         self.loss = get_loss(loss_name=self.cfg.loss.name, **self.cfg.loss.kwargs)
 
         # Training noise scheduler
-        self.training_noise_scheduler: DDPMScheduler = DDPMScheduler.from_pretrained(
+        self.training_noise_scheduler: FlowMatchEulerDiscreteScheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
             os.path.join(
                 base_ckpt_dir,
                 cfg.trainer.training_noise_scheduler.pretrained_path,
                 "scheduler",
             )
         )
-        self.prediction_type = self.training_noise_scheduler.config.prediction_type
-        assert (
-            self.prediction_type == self.model.scheduler.config.prediction_type
-        ), "Different prediction types"
+        # self.prediction_type = self.training_noise_scheduler.config.prediction_type
+        # assert (
+        #     self.prediction_type == self.model.scheduler.config.prediction_type
+        # ), "Different prediction types"
         self.scheduler_timesteps = (
             self.training_noise_scheduler.config.num_train_timesteps
         )
@@ -187,25 +208,27 @@ class MarigoldTrainer:
         logging.info("Unet config is updated")
         return
 
-    def _replace_unet_conv_in_zero_intialization(self):
-        # replace the first layer to accept 8 in_channels
-        _weight = self.model.unet.conv_in.weight.clone()  # [320, 4, 3, 3]
-        _bias = self.model.unet.conv_in.bias.clone()  # [320]
-        _weight_add = torch.zeros(_weight.shape)
-        _weight = torch.cat((_weight_add, _weight), 1) # [320, 8, 3, 3]
+    def _replace_transformer_conv_in_zero_intialization(self):
+        # replace the first layer to accept 16*2 in_channels
+        _weight = self.model.transformer.pos_embed.proj.weight.clone()  # [320, 16, 2, 2]
+        # print("_weight dtype", _weight.dtype)
+        _bias = self.model.transformer.pos_embed.proj.bias.clone()  # [320]
+        _weight_add = torch.zeros(_weight.shape).half()
+        # print("_weight_add dtype", _weight_add.dtype)
+        _weight = torch.cat((_weight_add, _weight), 1) # [320, 32, 2, 2]
         # new conv_in channel
-        _n_convin_out_channel = self.model.unet.conv_in.out_channels
+        _n_convin_out_channel = self.model.transformer.pos_embed.proj.out_channels
         _new_conv_in = Conv2d(
-            8, _n_convin_out_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
+            32, _n_convin_out_channel, kernel_size=(2, 2), stride=(2, 2)
         )
 
         _new_conv_in.weight = Parameter(_weight)
         _new_conv_in.bias = Parameter(_bias)
-        self.model.unet.conv_in = _new_conv_in
-        logging.info("Unet conv_in layer is replaced")
+        self.model.transformer.pos_embed.proj = _new_conv_in
+        logging.info("Transformer conv_in layer is replaced")
         # replace config
-        self.model.unet.config["in_channels"] = 8
-        logging.info("Unet config is updated with zero initialization")
+        self.model.transformer.config["in_channels"] = 32
+        logging.info("Transformer config is updated with zero initialization")
         return
 
 
@@ -230,7 +253,7 @@ class MarigoldTrainer:
 
             # Skip previous batches when resume
             for batch in skip_first_batches(self.train_loader, self.n_batch_in_epoch):
-                self.model.unet.train()
+                # self.model.unet.train()
 
                 # globally consistent random generators
                 if self.seed is not None:
@@ -243,30 +266,50 @@ class MarigoldTrainer:
                 # >>> With gradient accumulation >>>
 
                 # Get data
-                rgb = batch["image"].to(device).to(torch.float32)
-                field = batch["field"].to(device).to(torch.float32)
+                rgb = batch["image"].to(device).half()
+                field = batch["field"].to(device).half()
+                prompt = batch["prompt"]
+                negative_prompt = None
 
                 # normalize rgb 
                 rgb_norm: torch.Tensor = rgb / 255.0 * 2.0 - 1.0  #  [0, 255] -> [-1, 1]
-                rgb_norm = rgb_norm.float()
+                rgb_norm = rgb_norm.half()
                 assert rgb_norm.min() >= -1.0 and rgb_norm.max() <= 1.0
 
 
                 batch_size = rgb.shape[0]
                 with torch.no_grad():
-                    # Encode image
+                    # Encode image and condition
                     rgb_latent = self.model.encode_rgb(rgb_norm)  # [B, 4, h, w]
-                    # Encode field depth
                     field_latent = self.model.encode_field(field)  # [B, 4, h, w]
 
-                # Sample a random timestep for each image
-                timesteps = torch.randint(
-                    0,
-                    self.scheduler_timesteps,
-                    (batch_size,),
-                    device=device,
-                    generator=rand_num_generator,
-                ).long()  # [B]
+                # encode batch prompts when custom prompts are provided for each image -
+                if not self.train_text_encoder:
+                    prompt_embeds, pooled_prompt_embeds = self.model.compute_text_embeddings(
+                        prompt, self.model.text_encoders, self.model.tokenizers
+                    )
+                else:
+                    tokens_one = tokenize_prompt(tokenizer_one, prompts)
+                    tokens_two = tokenize_prompt(tokenizer_two, prompts)
+                    tokens_three = tokenize_prompt(tokenizer_three, prompts)
+                    prompt_embeds, pooled_prompt_embeds = encode_prompt(
+                        text_encoders=[text_encoder_one, text_encoder_two, text_encoder_three],
+                        tokenizers=[None, None, None],
+                        prompt=prompts,
+                        max_sequence_length=args.max_sequence_length,
+                        text_input_ids_list=[tokens_one, tokens_two, tokens_three],
+                    )
+                
+                noise_scheduler_copy = copy.deepcopy(self.training_noise_scheduler)
+                u = compute_density_for_timestep_sampling(
+                    weighting_scheme=self.weighting_scheme,
+                    batch_size=batch_size,
+                    logit_mean=0.0,
+                    logit_std=1.0,
+                    mode_scale=1.29,
+                )
+                indices = (u * noise_scheduler_copy.config.num_train_timesteps).long()
+                timesteps = noise_scheduler_copy.timesteps[indices].to(device=rgb_latent.device)
 
                 # Sample noise
                 if self.apply_multi_res_noise:
@@ -288,30 +331,55 @@ class MarigoldTrainer:
                         generator=rand_num_generator,
                     )  # [B, 4, h, w]
 
-                # Add noise to the latents (diffusion forward process)
-                noisy_latents = self.training_noise_scheduler.add_noise(
-                    rgb_latent, noise, timesteps
-                )  # [B, 4, h, w]
-
-                # Text embedding
-                text_embed = self.empty_text_embed.to(device).repeat(
-                    (batch_size, 1, 1)
-                )  # [B, 77, 1024]
+                # Add noise according to flow matching.
+                # zt = (1 - texp) * x + texp * z1
+                sigmas = self.get_sigmas(timesteps, n_dim=rgb_latent.ndim, dtype=rgb_latent.dtype)
+                noisy_latents = (1.0 - sigmas) * rgb_latent + sigmas * noise
 
                 # Concat field and rgb latents
                 cat_latents = torch.cat(
                     [field_latent, noisy_latents], dim=1
                 )  # [B, 8, h, w]
-                cat_latents = cat_latents.float()
+                cat_latents = cat_latents.half()
+                # cat_latents =  self.model.scheduler.scale_model_input(cat_latents, timesteps)
 
                 # Predict the noise residual
-                model_pred = self.model.unet(
-                    cat_latents, timesteps, text_embed
-                ).sample  # [B, 4, h, w]
+                # print("cat latents", cat_latents.shape)
+                # print("timesteps", timesteps)
+                # print("prompt_embeds", prompt_embeds.shape)
+                # print("pooled_prompt_embeds", pooled_prompt_embeds.shape)
+                # print("transformer class", type(self.model.transformer))
+                device = torch.device("cuda")
+                cat_latents = torch.randn(1, 32, 128, 128).to(device).half()
+                timesteps = torch.tensor([453.9749]).to(device).half()
+                prompt_embeds = torch.randn(1, 154, 4096).to(device).half()
+                pooled_prompt_embeds = torch.randn(1, 2048).to(device).half()
+                model_pred = self.model.transformer(
+                    hidden_states=cat_latents,
+                    timestep=timesteps,
+                    encoder_hidden_states=prompt_embeds,
+                    pooled_projections=pooled_prompt_embeds,
+                    return_dict=False,
+                )[0] # [B, 4, h, w]
                 if torch.isnan(model_pred).any():
                     logging.warning("model_pred contains NaN.")
 
+                # Follow: Section 5 of https://arxiv.org/abs/2206.00364.
+                # Preconditioning of the model outputs.
+                if self.precondition_outputs:
+                    model_pred = model_pred * (-sigmas) + noisy_latents
+                # these weighting schemes use a uniform timestep sampling
+                # and instead post-weight the loss
+                # weighting = compute_loss_weighting_for_sd3(weighting_scheme=self.weighting_scheme, sigmas=sigmas)
+
+                # flow matching loss
+                if self.precondition_outputs:
+                    target = noisy_latents
+                else:
+                    target = noise - noisy_latents
+
                 # Get the target for loss depending on the prediction type
+                self.prediction_type = "epsilon"
                 if "sample" == self.prediction_type:
                     target = rgb_latent
                 elif "epsilon" == self.prediction_type:
@@ -324,7 +392,7 @@ class MarigoldTrainer:
                     raise ValueError(f"Unknown prediction type {self.prediction_type}")
 
                
-                latent_loss = self.loss(model_pred.float(), target.float())
+                latent_loss = self.loss(model_pred.half(), target.half())
 
                 loss = latent_loss.mean()
 
@@ -480,6 +548,19 @@ class MarigoldTrainer:
 
     '''
 
+    def get_sigmas(self, timesteps, n_dim=4, dtype=torch.float32):
+        noise_scheduler_copy = copy.deepcopy(self.training_noise_scheduler)
+        device = self.device
+        sigmas = noise_scheduler_copy.sigmas.to(device=device, dtype=dtype)
+        schedule_timesteps = noise_scheduler_copy.timesteps.to(device)
+        timesteps = timesteps.to(device)
+        step_indices = [(schedule_timesteps == t).nonzero().item() for t in timesteps]
+
+        sigma = sigmas[step_indices].flatten()
+        while len(sigma.shape) < n_dim:
+            sigma = sigma.unsqueeze(-1)
+        return sigma
+
     def visualize(self):
         for val_loader in self.vis_loaders:
             vis_dataset_name = val_loader.dataset.disp_name
@@ -519,8 +600,8 @@ class MarigoldTrainer:
             
             assert 1 == data_loader.batch_size
             # Read input field
-            rgb_int = batch["image"].to(self.device).to(torch.float32)
-            field_int = batch["field"].to(self.device).to(torch.float32)
+            rgb_int = batch["image"].to(self.device).half()
+            field_int = batch["field"].to(self.device).half()
             # [1, 3, H, W]
 
             # Random number generator
@@ -607,10 +688,10 @@ class MarigoldTrainer:
             os.rename(ckpt_dir, temp_ckpt_dir)
             logging.debug(f"Old checkpoint is backed up at: {temp_ckpt_dir}")
 
-        # Save UNet
-        unet_path = os.path.join(ckpt_dir, "unet")
-        self.model.unet.save_pretrained(unet_path, safe_serialization=False)
-        logging.info(f"UNet is saved to: {unet_path}")
+        # Save Transformer
+        transformer_path = os.path.join(ckpt_dir, "transformer")
+        self.model.transformer.save_pretrained(transformer_path, safe_serialization=False)
+        logging.info(f"Transformer is saved to: {transformer_path}")
 
         if save_train_state:
             state = {
@@ -641,13 +722,13 @@ class MarigoldTrainer:
         self, ckpt_path, load_trainer_state=True, resume_lr_scheduler=True
     ):
         logging.info(f"Loading checkpoint from: {ckpt_path}")
-        # Load UNet
-        _model_path = os.path.join(ckpt_path, "unet", "diffusion_pytorch_model.bin")
-        self.model.unet.load_state_dict(
+        # Load Transformer
+        _model_path = os.path.join(ckpt_path, "transformer", "diffusion_pytorch_model.bin")
+        self.model.transformer.load_state_dict(
             torch.load(_model_path, map_location=self.device)
         )
-        self.model.unet.to(self.device)
-        logging.info(f"UNet parameters are loaded from {_model_path}")
+        self.model.transformer.to(self.device)
+        logging.info(f"Transformer parameters are loaded from {_model_path}")
 
         # Load training states
         if load_trainer_state:

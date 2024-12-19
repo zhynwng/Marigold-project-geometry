@@ -127,7 +127,7 @@ class BaseDepthDataset(Dataset):
         return batch
 
     def _get_data_item(self, index):
-        img_rel_path, field_rel_path, depth_rel_path, filled_rel_path = self._get_data_path(index=index)
+        img_rel_path, field_rel_path, filled_rel_path = self._get_data_path(index=index)
         prompt_index = img_rel_path.split('/')[-1].split('.')[0]
 
         batch = {}
@@ -135,7 +135,7 @@ class BaseDepthDataset(Dataset):
         batch["index"] = prompt_index
         batch["image"] = self._read_image(img_rel_path)
         batch["field"] = self._read_image(field_rel_path)
-        batch["depth"] = self.read_depth(depth_rel_path)
+        # batch["depth"] = self.read_depth(depth_rel_path)
         if self.prompts is not None:
             batch["prompt"] = self.prompts[prompt_index]
         else:
@@ -179,9 +179,8 @@ class BaseDepthDataset(Dataset):
         field_rel_path, filled_rel_path = None, None
         if DatasetMode.RGB_ONLY != self.mode:
             field_rel_path = filename_line[1]
-            depth_rel_path = filename_line[2]
                 
-        return rgb_rel_path, field_rel_path, depth_rel_path, filled_rel_path
+        return rgb_rel_path, field_rel_path, filled_rel_path
 
     def _read_image(self, img_rel_path) -> np.ndarray:
         if self.is_tar:

@@ -18,5 +18,5 @@
 # --------------------------------------------------------------------------
 
 
-from .marigold_pipeline import MarigoldPipeline, MarigoldOutput  # noqa: F401
-from .finetune_pipeline import FinetunePipeline, FinetuneOutput
+from .marigold_pipeline import MarigoldSD3Pipeline, MarigoldOutput  # noqa: F401
+# from .finetune_pipeline import FinetunePipeline, FinetuneOutput

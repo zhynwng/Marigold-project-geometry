@@ -32,9 +32,8 @@ from omegaconf import OmegaConf
 from torch.utils.data import ConcatDataset, DataLoader
 from tqdm import tqdm
 
-from marigold.finetune_pipeline import FinetunePipeline
-from marigold.marigold_pipeline import MarigoldPipeline
-from marigold.marigold_pipeline_SDXL import SDXLPipeline
+# from marigold.finetune_pipeline import FinetunePipeline
+from marigold.marigold_pipeline import MarigoldSD3Pipeline
 
 from src.dataset import BaseDepthDataset, DatasetMode, get_dataset
 from src.dataset.mixed_sampler import MixedBatchSampler
@@ -326,8 +325,8 @@ if "__main__" == __name__:
 
     # -------------------- Model --------------------
     _pipeline_kwargs = cfg.pipeline.kwargs if cfg.pipeline.kwargs is not None else {}
-    model = SDXLPipeline.from_pretrained(
-        os.path.join(base_ckpt_dir, cfg.model.pretrained_path), **_pipeline_kwargs, addition_embed_type = None, torch_dtype=torch.float32, #variant=variant, use_safetensors=True
+    model = MarigoldSD3Pipeline.from_pretrained(
+        os.path.join(base_ckpt_dir, cfg.model.pretrained_path), **_pipeline_kwargs, torch_dtype=torch.float16, # variant=variant, use_safetensors=True
     )
 
     # -------------------- Trainer --------------------

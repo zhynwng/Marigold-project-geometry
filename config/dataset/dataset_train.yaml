@@ -2,7 +2,9 @@ dataset:
   train:
     name: kandinsky_indoor_field
     disp_name: field_train
-    dir: /scratch/yz5880/Projective-Geometry-1024/Indoor_Real_1024
-    filenames: /scratch/zhiyanw/Indoor_Real_1024.txt
+    # dir: /scratch/yz5880/Projective-Geometry-1024/Indoor_Real_1024
+    # filenames: /scratch/yz5880/Projective-Geometry-1024/Indoor_Real_1024/40K_mini_list.txt
+    dir: /share/data/p2p/yz5880/Projective-Geometry-1024/Indoor_Real_1024
+    filenames: /share/data/p2p/yz5880/Projective-Geometry-1024/Indoor_Real_1024/1K_mini_list.txt
     has_filled_depth: False
-    promptlist: /scratch/yz5880/Projective-Geometry-1024/Indoor_Real_1024/captions_400k.json
+    promptlist: /share/data/p2p/yz5880/captions_400k.json
